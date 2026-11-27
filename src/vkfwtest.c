@@ -13,7 +13,6 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "vkfwtest.h"
 
@@ -25,20 +24,59 @@ struct test {
 	const char *name;
 	const char *alias;
 	test_fn fn;
+	bool in_all;            /* run by `all`; disruptive and long tests are not */
 	const char *desc;
 };
 
 static const struct test tests[] = {
-	{ "multiframe", "pre-3d", test_multiframe,
+	{ "multiframe", "pre-3d", test_multiframe, true,
 	  "TA + 3D over several frames on one device (alternating HWRTData); --iters for heavy fragments" },
-	{ "pre-ta", nullptr, test_preta,
+	{ "pre-ta", nullptr, test_preta, true,
 	  "geometry-heavy frames: layers of tiny tiled triangles (--tris, default 100K)" },
-	{ "pre-cdm", nullptr, test_precdm,
+	{ "pre-cdm", nullptr, test_precdm, true,
 	  "compute dispatches writing an LCG pattern (--groups, --iters)" },
-	{ "xfer", nullptr, test_xfer,
+	{ "xfer", nullptr, test_xfer, true,
 	  "3D transfers: upload, offset copy, mirrored blit, MSAA resolve on NPOT and POT images" },
-	{ "bigpb", nullptr, test_bigpb,
+	{ "bigpb", nullptr, test_bigpb, true,
 	  "parameter-buffer stress: millions of triangles + D32 depth (--tris, default 4M)" },
+	{ "input-attach", nullptr, test_input_attach, true,
+	  "two subpasses: subpass 1 reads colour + D32 depth of subpass 0 as input attachments" },
+	{ "rta", nullptr, test_rta, true,
+	  "6-layer render target: layered clears, and gl_Layer draws when supported" },
+	{ "texture", nullptr, test_texture, true,
+	  "texture unit: NPOT, 4 address modes, 2 border colours, linear filter, 6 mip levels" },
+	{ "zs-load", nullptr, test_zs_load, true,
+	  "depth + stencil loaded and stored across render passes" },
+	{ "msaa", nullptr, test_msaa, true,
+	  "4x render resolved in the render pass, diagonal edge checked per sample" },
+	{ "mrt", nullptr, test_mrt, true,
+	  "up to 8 colour attachments written by one subpass" },
+	{ "sizes", nullptr, test_sizes, true,
+	  "render targets from 1x1 to 4096x4096 (unique value per pixel) + partial render area" },
+	{ "vertex", nullptr, test_vertex, true,
+	  "vertex/index buffers (16/32-bit), instancing, points, lines" },
+	{ "indirect", nullptr, test_indirect, true,
+	  "draw / indexed / multi-draw indirect and dispatch indirect" },
+	{ "queries", nullptr, test_queries, true,
+	  "occlusion queries (host + GPU copy) and timestamps" },
+	{ "formats", nullptr, test_formats, true,
+	  "RGB565, BGRA8, sRGB, RGBA16F, R32_UINT targets; additive blend; discard" },
+	{ "stress", nullptr, test_stress, true,
+	  "4 threads / devices rendering, computing and copying at once" },
+	{ "soak", nullptr, test_soak, true,
+	  "one long-lived device: >= 100 frames of render, compute, geometry, transfer" },
+	{ "churn", nullptr, test_churn, true,
+	  "create and destroy 20 devices, each rendering and computing" },
+	{ "hwr-lockup", nullptr, test_hwr_lockup, false,
+	  "[not in all] controlled GPU lockup -> device lost, then clean renders on new devices" },
+	{ "hwr-fault", nullptr, test_hwr_fault, false,
+	  "[not in all] controlled MMU page fault -> device lost, then clean renders on new devices" },
+	{ "prio-3d", nullptr, test_prio_3d, false,
+	  "[not in all] long LOW-priority fragment job vs HIGH-priority probes (preemption)" },
+	{ "prio-ta", nullptr, test_prio_ta, false,
+	  "[not in all] long LOW-priority geometry job vs HIGH-priority probes (preemption)" },
+	{ "prio-cdm", nullptr, test_prio_cdm, false,
+	  "[not in all] long LOW-priority compute job vs HIGH-priority probes (preemption)" },
 };
 constexpr size_t NTESTS = sizeof(tests) / sizeof(tests[0]);
 
@@ -46,6 +84,7 @@ static void usage(FILE *f)
 {
 	fprintf(f,
 		"usage: vkfwtest [options] <test>... | all | list\n"
+		"  all runs every test except hwr-* and prio-* (see 'vkfwtest list')\n"
 		"\n"
 		"  -f, --frames N      frames / rounds per test (default per test)\n"
 		"  -s, --size WxH      render target size (or N for NxN)\n"
@@ -57,6 +96,7 @@ static void usage(FILE *f)
 		"  -r, --repeat N      run each test N times\n"
 		"  -p, --priority P    low|medium|high (VK_KHR/EXT_global_priority)\n"
 		"  -d, --device N      physical device index (default: first PowerVR, else 0)\n"
+		"  -P, --require-preempt  prio-*: fail unless the probes overtake the long job\n"
 		"  -k, --keep-going    run the remaining tests after a failure\n"
 		"  -j, --json          one JSON line per test on stdout\n"
 		"  -v, --verbose       more output (repeat for more)\n"
@@ -71,7 +111,7 @@ static void usage(FILE *f)
 static void list(void)
 {
 	for (size_t i = 0; i < NTESTS; i++)
-		printf("%-11s %-8s %s\n", tests[i].name, tests[i].alias ? tests[i].alias : "",
+		printf("%-13s %-7s %s\n", tests[i].name, tests[i].alias ? tests[i].alias : "",
 		       tests[i].desc);
 }
 
@@ -130,14 +170,6 @@ static bool parse_size(const char *s, uint32_t *w, uint32_t *h)
 }
 
 /* ------------------------------------------------------------ run */
-static double now_ms(void)
-{
-	struct timespec t;
-
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
-}
-
 /* Worst result first: lost > timeout > mismatch > setup > skip > pass. */
 static int severity(enum result r)
 {
@@ -190,7 +222,7 @@ static enum result run_one(const struct test *t, const struct opts *o, uint32_t 
 		json_str(rep.detail);
 		printf("}\n");
 	} else {
-		printf("%-7s %-10s %9.1f ms  %s\n", result_name(r), t->name, ms, rep.detail);
+		printf("%-7s %-12s %9.1f ms  %s\n", result_name(r), t->name, ms, rep.detail);
 	}
 	fflush(stdout);
 	return r;
@@ -210,6 +242,7 @@ int main(int argc, char **argv)
 		{ "priority", required_argument, nullptr, 'p' },
 		{ "device", required_argument, nullptr, 'd' },
 		{ "keep-going", no_argument, nullptr, 'k' },
+		{ "require-preempt", no_argument, nullptr, 'P' },
 		{ "json", no_argument, nullptr, 'j' },
 		{ "verbose", no_argument, nullptr, 'v' },
 		{ "quiet", no_argument, nullptr, 'q' },
@@ -220,7 +253,7 @@ int main(int argc, char **argv)
 	struct opts o = { .device = -1 };
 	int c;
 
-	while ((c = getopt_long(argc, argv, "f:s:t:i:g:S:T:r:p:d:kjvqVh", lo, nullptr)) != -1) {
+	while ((c = getopt_long(argc, argv, "f:s:t:i:g:S:T:r:p:d:PkjvqVh", lo, nullptr)) != -1) {
 		bool ok = true;
 
 		switch (c) {
@@ -250,6 +283,7 @@ int main(int argc, char **argv)
 			break;
 		}
 		case 'k': o.keep_going = true; break;
+		case 'P': o.require_preempt = true; break;
 		case 'j': o.json = true; break;
 		case 'v': o.verbose++; break;
 		case 'q': o.verbose = -1; break;
@@ -278,7 +312,8 @@ int main(int argc, char **argv)
 		}
 		if (!strcmp(argv[a], "all")) {
 			for (size_t i = 0; i < NTESTS && n < 64; i++)
-				run[n++] = &tests[i];
+				if (tests[i].in_all)
+					run[n++] = &tests[i];
 			continue;
 		}
 		const struct test *t = find(argv[a]);

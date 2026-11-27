@@ -40,6 +40,7 @@ struct opts {
 	int device;             /* -1: first PowerVR device, else device 0 */
 	bool keep_going;
 	bool json;
+	bool require_preempt;   /* prio-*: fail unless the high-priority probes overtake */
 	int verbose;            /* -1 quiet, 0 normal, 1+ verbose */
 };
 
@@ -49,6 +50,7 @@ struct opts {
 enum obj_kind {
 	OBJ_BUFFER, OBJ_IMAGE, OBJ_VIEW, OBJ_MEMORY, OBJ_RENDER_PASS, OBJ_FRAMEBUFFER,
 	OBJ_PIPELINE, OBJ_PIPELINE_LAYOUT, OBJ_SET_LAYOUT, OBJ_DESC_POOL, OBJ_SHADER,
+	OBJ_SAMPLER, OBJ_QUERY_POOL,
 };
 
 /* Non-dispatchable handles are pointers on 64-bit hosts, uint64_t elsewhere. */
@@ -60,7 +62,7 @@ enum obj_kind {
 #define U2H(T, u) ((T)(u))
 #endif
 
-constexpr int MAX_OBJS = 256;
+constexpr int MAX_OBJS = 1024;
 
 struct vk {
 	VkInstance inst;
@@ -74,6 +76,9 @@ struct vk {
 	VkFence fence;
 	uint64_t timeout_ns;
 	bool lost;
+	bool has_output_layer;  /* VK_EXT_shader_viewport_index_layer enabled */
+	bool has_precise_occlusion;     /* occlusionQueryPrecise enabled */
+	bool has_multidraw;             /* multiDrawIndirect enabled */
 	int verbose;
 	struct { enum obj_kind kind; uint64_t h; } objs[MAX_OBJS];
 	int nobjs;
@@ -113,6 +118,8 @@ enum result vk_fail(struct vk *v, VkResult r, const char *what, const char *file
 			return e_;                                              \
 	} while (0)
 
+typedef enum result (*test_fn)(struct vk *v, const struct opts *o, struct report *r);
+
 /* ------------------------------------------------------------ resources */
 struct buf {
 	VkBuffer b;
@@ -136,19 +143,48 @@ struct img {
 [[nodiscard]] enum result img_create(struct vk *v, struct img *im, uint32_t w, uint32_t h,
 				     VkFormat fmt, VkImageUsageFlags usage,
 				     VkSampleCountFlagBits samples);
+/* A 2D array image (view type 2D_ARRAY when layers > 1). */
+[[nodiscard]] enum result img_create_layers(struct vk *v, struct img *im, uint32_t w,
+					    uint32_t h, uint32_t layers, VkFormat fmt,
+					    VkImageUsageFlags usage);
 [[nodiscard]] enum result shader_create(struct vk *v, VkShaderModule *m, const uint32_t *code,
 					size_t size);
 
 /* One-shot command buffers. */
 [[nodiscard]] enum result cmd_begin(struct vk *v, VkCommandBuffer *cb);
 [[nodiscard]] enum result cmd_submit_wait(struct vk *v, VkCommandBuffer cb);
+/* Submit without waiting, signalling *fence (created here); then wait for it. */
+[[nodiscard]] enum result cmd_submit_async(struct vk *v, VkCommandBuffer cb, VkFence *fence);
+[[nodiscard]] enum result fence_wait(struct vk *v, VkFence fence, uint64_t timeout_ns);
 
 void img_barrier(VkCommandBuffer cb, const struct img *im, VkImageLayout from, VkImageLayout to,
 		 VkAccessFlags src_access, VkAccessFlags dst_access,
 		 VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
 /* Copy a whole 1-sample colour image (TRANSFER_SRC_OPTIMAL) into a host buffer. */
 void cmd_copy_to_buffer(VkCommandBuffer cb, const struct img *im, const struct buf *b);
+/* The same for one layer of an array image, at byte offset `off` of the buffer. */
+void cmd_copy_layer_to_buffer(VkCommandBuffer cb, const struct img *im, uint32_t layer,
+			      const struct buf *b, VkDeviceSize off);
 
+/*
+ * A render pass with one subpass: `colors` colour attachments (0 = 1), each
+ * with an optional 1-sample resolve attachment, and an optional depth/stencil
+ * attachment. Attachment order: colours, resolves, depth.
+ */
+struct rp_desc {
+	VkFormat color;
+	uint32_t colors;
+	VkSampleCountFlagBits samples;  /* 0 = 1 */
+	bool color_load;        /* LOAD (from TRANSFER_DST_OPTIMAL) instead of CLEAR */
+	bool resolve;
+	VkFormat depth;         /* VK_FORMAT_UNDEFINED: none */
+	bool depth_load;        /* LOAD depth/stencil (from DEPTH_STENCIL_ATTACHMENT_OPTIMAL) */
+	bool stencil;           /* the depth format has stencil: clear/load and store it too */
+};
+[[nodiscard]] enum result rp_build(struct vk *v, VkRenderPass *rp, const struct rp_desc *d);
+[[nodiscard]] enum result fb_create_views(struct vk *v, VkFramebuffer *fb, VkRenderPass rp,
+					  const VkImageView *views, uint32_t n, uint32_t w,
+					  uint32_t h, uint32_t layers);
 /* A render pass with one colour attachment and an optional depth attachment. */
 [[nodiscard]] enum result rp_create(struct vk *v, VkRenderPass *rp, VkFormat color,
 				    VkFormat depth);
@@ -160,8 +196,30 @@ struct gfx_desc {
 	VkPipelineLayout layout;
 	VkShaderModule vs, fs;
 	bool depth;             /* depth test LESS + write */
+	uint32_t subpass;
+	/* optional; zero/null keeps the defaults above */
+	const VkPipelineVertexInputStateCreateInfo *vertex_input;
+	const VkPrimitiveTopology *topology;    /* null: triangle list */
+	uint32_t colors;                        /* colour attachments, 0 = 1 */
+	VkSampleCountFlagBits samples;          /* 0 = 1 */
+	bool blend_add;                         /* dst + src (ONE, ONE) on every attachment */
+	const VkCompareOp *depth_op;            /* null: LESS */
+	bool depth_no_write;
+	const VkStencilOpState *stencil;        /* null: no stencil test */
 };
 [[nodiscard]] enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d);
+/* A compute pipeline whose set 0 binding 0 is the storage buffer `ssbo`. */
+[[nodiscard]] enum result compute_pipeline(struct vk *v, const uint32_t *code, size_t size,
+					   uint32_t pc_size, const struct buf *ssbo,
+					   VkPipelineLayout *l, VkPipeline *p, VkDescriptorSet *set);
+double now_ms(void);
+/* Descriptor set layout + pool + one set for `n` bindings. */
+[[nodiscard]] enum result desc_create(struct vk *v, const VkDescriptorSetLayoutBinding *b,
+				      uint32_t n, VkDescriptorSetLayout *dsl, VkDescriptorSet *set);
+[[nodiscard]] enum result sampler_create(struct vk *v, const VkSamplerCreateInfo *ci,
+					 VkSampler *s);
+/* Run a test on a device of its own; adds its counters to r. */
+enum result run_fresh(const struct opts *o, test_fn fn, struct report *r);
 [[nodiscard]] enum result layout_create(struct vk *v, VkPipelineLayout *l,
 					VkShaderStageFlags pc_stages, uint32_t pc_size,
 					const VkDescriptorSetLayout *set);
@@ -184,22 +242,61 @@ typedef struct rgba (*expect_fn)(uint32_t x, uint32_t y, const void *ctx);
 enum result check_rgba(struct vk *v, struct report *r, const char *what, const uint8_t *px,
 		       uint32_t w, uint32_t h, expect_fn fn, const void *ctx);
 
-/* The LCG the shaders run: x = x * 1664525 + 1013904223, n times. */
+/*
+ * The LCG the shaders run: x = x * 1664525 + 1013904223, n times. The n-fold
+ * composition of the affine map is computed by squaring, so checking a job of
+ * millions of iterations costs O(log n) per value.
+ */
 static inline uint32_t lcg(uint32_t x, uint32_t n)
 {
-	for (uint32_t i = 0; i < n; i++)
-		x = x * 1664525u + 1013904223u;
-	return x;
+	uint32_t a = 1664525u, c = 1013904223u;         /* f(x) = a x + c */
+	uint32_t ra = 1u, rc = 0u;                      /* result map, starts as identity */
+
+	while (n) {
+		if (n & 1u) {                           /* result = f o result */
+			rc = a * rc + c;
+			ra = a * ra;
+		}
+		c = a * c + c;                          /* f = f o f */
+		a = a * a;
+		n >>= 1;
+	}
+	return ra * x + rc;
 }
 
+/* The same, allowing each channel to differ by up to `tol` (filtering, sRGB). */
+enum result check_rgba_tol(struct vk *v, struct report *r, const char *what, const uint8_t *px,
+			   uint32_t w, uint32_t h, uint32_t tol, expect_fn fn, const void *ctx);
+/* Compare only every `step`-th pixel (long jobs with costly expectations). */
+enum result check_rgba_step(struct vk *v, struct report *r, const char *what, const uint8_t *px,
+			    uint32_t w, uint32_t h, uint32_t step, expect_fn fn, const void *ctx);
+
 /* ------------------------------------------------------------ tests */
-typedef enum result (*test_fn)(struct vk *v, const struct opts *o, struct report *r);
 
 enum result test_multiframe(struct vk *v, const struct opts *o, struct report *r);
 enum result test_preta(struct vk *v, const struct opts *o, struct report *r);
 enum result test_precdm(struct vk *v, const struct opts *o, struct report *r);
 enum result test_xfer(struct vk *v, const struct opts *o, struct report *r);
 enum result test_bigpb(struct vk *v, const struct opts *o, struct report *r);
+enum result test_input_attach(struct vk *v, const struct opts *o, struct report *r);
+enum result test_rta(struct vk *v, const struct opts *o, struct report *r);
+enum result test_hwr_lockup(struct vk *v, const struct opts *o, struct report *r);
+enum result test_prio_3d(struct vk *v, const struct opts *o, struct report *r);
+enum result test_prio_ta(struct vk *v, const struct opts *o, struct report *r);
+enum result test_prio_cdm(struct vk *v, const struct opts *o, struct report *r);
+enum result test_texture(struct vk *v, const struct opts *o, struct report *r);
+enum result test_zs_load(struct vk *v, const struct opts *o, struct report *r);
+enum result test_msaa(struct vk *v, const struct opts *o, struct report *r);
+enum result test_mrt(struct vk *v, const struct opts *o, struct report *r);
+enum result test_sizes(struct vk *v, const struct opts *o, struct report *r);
+enum result test_vertex(struct vk *v, const struct opts *o, struct report *r);
+enum result test_indirect(struct vk *v, const struct opts *o, struct report *r);
+enum result test_queries(struct vk *v, const struct opts *o, struct report *r);
+enum result test_formats(struct vk *v, const struct opts *o, struct report *r);
+enum result test_stress(struct vk *v, const struct opts *o, struct report *r);
+enum result test_soak(struct vk *v, const struct opts *o, struct report *r);
+enum result test_churn(struct vk *v, const struct opts *o, struct report *r);
+enum result test_hwr_fault(struct vk *v, const struct opts *o, struct report *r);
 
 /* grid.c: the tiled-triangle workload shared by pre-ta and bigpb */
 struct grid {

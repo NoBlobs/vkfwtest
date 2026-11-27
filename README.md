@@ -37,6 +37,7 @@ types, and byte-wise checks.
 
 ```
 vkfwtest [options] <test>... | all | list
+  all runs every test except hwr-* and prio-*
 
   -f, --frames N      frames / rounds per test (default per test)
   -s, --size WxH      render target size (or N for NxN)
@@ -48,6 +49,7 @@ vkfwtest [options] <test>... | all | list
   -r, --repeat N      run each test N times
   -p, --priority P    low|medium|high (VK_KHR/EXT_global_priority)
   -d, --device N      physical device index (default: first PowerVR, else 0)
+  -P, --require-preempt  prio-*: fail unless the probes overtake the long job
   -k, --keep-going    run the remaining tests after a failure
   -j, --json          one JSON line per test on stdout
   -v, --verbose / -q, --quiet / -V, --version / -h, --help
@@ -89,9 +91,33 @@ On a mismatch, the first 8 wrong values are printed on stderr as `(x,y) got … 
 | `pre-cdm` | compute dispatches (local size 64) | every word equals `lcg(id ^ seed, iters)` |
 | `xfer` | 3D-pipe transfers on a 137×91 (NPOT) and a 256×256 image: upload, copy with offsets onto a cleared image, mirrored 1:1 blit, 4× MSAA clear + resolve | every byte |
 | `bigpb` | parameter-buffer out-of-memory: millions of triangles (4 M by default) into 1024×1024 + `D32_SFLOAT` (stored), so free-list grows and partial renders happen | every pixel equals the **first** layer's colour (later layers are farther away), so a partial render that loses depth or colour fails |
+| `input-attach` | one render pass with two subpasses (two HWRTData). Subpass 0: clear and a depth-tested rectangle. Subpass 1: reads colour + `D32` depth as input attachments | both colour attachments, every pixel |
+| `rta` | a 6-layer render target (render-target arrays): the render pass clear, per-layer `vkCmdClearAttachments`, and, with `VK_EXT_shader_viewport_index_layer`, one `gl_Layer` draw per layer | every pixel of every layer |
+| `texture` | texture unit: a 37×23 (NPOT) texture with REPEAT, MIRRORED_REPEAT, CLAMP_TO_EDGE, CLAMP_TO_BORDER (white, transparent), LINEAR halfway between texels, and 6 mip levels | every texel or border colour; the linear case allows ±1 |
+| `zs-load` | depth + stencil (D24S8 or D32S8, else depth only) stored by one render pass and loaded by the next two | the depth test and the stencil test of the later passes select the expected halves |
+| `msaa` | 4× rendering resolved by a resolve attachment; a triangle edge along the diagonal | full pixels exact; diagonal pixels (2 of 4 standard sample positions) equal the average ±1 |
+| `mrt` | up to 8 colour attachments written by one subpass | every pixel of every attachment |
+| `sizes` | render targets of 1×1, 7×5, 33×17, 97×61, 256×1, 1×256, 1000×3, 1920×1080, 4096×4096, plus a partial `renderArea` with LOAD | a unique per-pixel value everywhere; pixels outside the render area keep their colour |
+| `vertex` | vertex and index buffers (16- and 32-bit indices, `firstIndex`, `vertexOffset`, `firstInstance`), instancing, point and line lists | every pixel |
+| `indirect` | `vkCmdDrawIndirect`, `vkCmdDrawIndexedIndirect`, multi-draw indirect (when supported), `vkCmdDispatchIndirect` | the drawn cells; the dispatched words, with a sentinel after them |
+| `queries` | occlusion queries (exact with `occlusionQueryPrecise`), read on the host and copied by the GPU; timestamps | 960 / 0 / 0 samples; increasing timestamps |
+| `formats` | R5G6B5, B8G8R8A8, R8G8B8A8_SRGB, R16G16B16A16_SFLOAT, R32_UINT targets; additive blending; `discard` | the raw bytes of every pixel (sRGB ±1) |
+| `stress` | four threads with a device each, running `multiframe`, `pre-ta`, `pre-cdm` and `xfer` at the same time | the four tests' own checks |
+| `soak` | one device running `multiframe` ×120, `pre-cdm` ×120, `pre-ta` ×20, `xfer` ×10 | the same |
+| `churn` | 20 devices created and destroyed, each with 2 frames and a dispatch | the same |
+| `hwr-lockup` | **not in `all`**. A compute shader that spins forever. The submission must end in `VK_ERROR_DEVICE_LOST` (watchdog recovery); then `multiframe` and `pre-cdm` must pass on new devices, without reloading the driver | device lost, then the two tests |
+| `hwr-fault` | **not in `all`**. A compute shader that writes and reads about 4 GiB beyond its storage buffer: an MMU page fault. Then the same recovery checks as `hwr-lockup` | device lost, then the two tests |
+| `prio-3d`, `prio-ta`, `prio-cdm` | **not in `all`**. A long job calibrated to about 1.5 s on a LOW-priority device, while 10 short probes run on a HIGH-priority device | every output. It reports whether the probes were delayed; with `--require-preempt`, a delay is a failure |
 
 All geometry is generated from `gl_VertexIndex`, with no vertex buffers. Cell edges fall on
 pixel edges, so every expected colour is exact.
+
+The shaders' integer LCG (`--iters`) is checked with its closed form: the n-fold
+composition of the affine map, computed by squaring. Even jobs of hundreds of millions of
+iterations are checked exactly.
+
+**Do not run `hwr-lockup` or `hwr-fault` on a desktop GPU that drives your display**: the screen can
+freeze until the driver recovers.
 
 ## Clean-room note
 

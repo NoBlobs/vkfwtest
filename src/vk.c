@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "vkfwtest.h"
 
@@ -75,36 +76,49 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 		.queueCount = 1,
 		.pQueuePriorities = &prio,
 	};
-	const char *ext[1];
-	uint32_t next = 0;
+	const char *ext[2];
+	uint32_t next = 0, n = 0;
+	VkExtensionProperties *e;
 
+	vkEnumerateDeviceExtensionProperties(v->phys, nullptr, &n, nullptr);
+	e = calloc(n ? n : 1, sizeof(*e));
+	if (!e)
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	vkEnumerateDeviceExtensionProperties(v->phys, nullptr, &n, e);
+	v->has_output_layer = has_ext(e, n, VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+	if (v->has_output_layer)
+		ext[next++] = VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME;
 	if (with_prio) {
-		uint32_t n = 0;
-		VkExtensionProperties *e;
-
-		vkEnumerateDeviceExtensionProperties(v->phys, nullptr, &n, nullptr);
-		e = calloc(n ? n : 1, sizeof(*e));
-		if (!e)
-			return VK_ERROR_OUT_OF_HOST_MEMORY;
-		vkEnumerateDeviceExtensionProperties(v->phys, nullptr, &n, e);
 		if (has_ext(e, n, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
 			ext[next++] = VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME;
 		else if (has_ext(e, n, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME))
 			ext[next++] = VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
-		free(e);
-		if (!next)
+		else {
+			free(e);
 			return VK_ERROR_EXTENSION_NOT_PRESENT;
+		}
 		gp.globalPriority = o->priority == PRIO_LOW ? VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR :
 				    o->priority == PRIO_HIGH ? VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR :
 							       VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
 		q.pNext = &gp;
 	}
+	free(e);
+
+	/* the optional features some tests use, when the device has them */
+	VkPhysicalDeviceFeatures have, want = { 0 };
+
+	vkGetPhysicalDeviceFeatures(v->phys, &have);
+	want.occlusionQueryPrecise = have.occlusionQueryPrecise;
+	want.multiDrawIndirect = have.multiDrawIndirect;
+	v->has_precise_occlusion = have.occlusionQueryPrecise;
+	v->has_multidraw = have.multiDrawIndirect;
 	VkDeviceCreateInfo dci = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 		.queueCreateInfoCount = 1,
 		.pQueueCreateInfos = &q,
 		.enabledExtensionCount = next,
 		.ppEnabledExtensionNames = ext,
+		.pEnabledFeatures = &want,
 	};
 	return vkCreateDevice(v->phys, &dci, nullptr, &v->dev);
 }
@@ -235,6 +249,10 @@ void vk_fini(struct vk *v)
 			case OBJ_SHADER:
 				vkDestroyShaderModule(v->dev, U2H(VkShaderModule, h), nullptr);
 				break;
+			case OBJ_SAMPLER: vkDestroySampler(v->dev, U2H(VkSampler, h), nullptr); break;
+			case OBJ_QUERY_POOL:
+				vkDestroyQueryPool(v->dev, U2H(VkQueryPool, h), nullptr);
+				break;
 			}
 		}
 		if (v->fence)
@@ -316,8 +334,9 @@ static bool is_depth(VkFormat f)
 	       f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
-enum result img_create(struct vk *v, struct img *im, uint32_t w, uint32_t h, VkFormat fmt,
-		       VkImageUsageFlags usage, VkSampleCountFlagBits samples)
+static enum result img_make(struct vk *v, struct img *im, uint32_t w, uint32_t h,
+			    uint32_t layers, VkFormat fmt, VkImageUsageFlags usage,
+			    VkSampleCountFlagBits samples)
 {
 	VkImageCreateInfo ici = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -325,7 +344,7 @@ enum result img_create(struct vk *v, struct img *im, uint32_t w, uint32_t h, VkF
 		.format = fmt,
 		.extent = { w, h, 1 },
 		.mipLevels = 1,
-		.arrayLayers = 1,
+		.arrayLayers = layers,
 		.samples = samples,
 		.tiling = VK_IMAGE_TILING_OPTIMAL,
 		.usage = usage,
@@ -338,7 +357,7 @@ enum result img_create(struct vk *v, struct img *im, uint32_t w, uint32_t h, VkF
 	im->fmt = fmt;
 	im->w = w;
 	im->h = h;
-	im->layers = 1;
+	im->layers = layers;
 	im->samples = samples;
 	im->aspect = is_depth(fmt) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 	VK_CHECK(v, vkCreateImage(v->dev, &ici, nullptr, &im->i));
@@ -352,14 +371,26 @@ enum result img_create(struct vk *v, struct img *im, uint32_t w, uint32_t h, VkF
 		VkImageViewCreateInfo vci = {
 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 			.image = im->i,
-			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
 			.format = fmt,
-			.subresourceRange = { im->aspect, 0, 1, 0, 1 },
+			.subresourceRange = { im->aspect, 0, 1, 0, layers },
 		};
 		VK_CHECK(v, vkCreateImageView(v->dev, &vci, nullptr, &im->view));
 		vk_track(v, OBJ_VIEW, H2U(im->view));
 	}
 	return R_PASS;
+}
+
+enum result img_create(struct vk *v, struct img *im, uint32_t w, uint32_t h, VkFormat fmt,
+		       VkImageUsageFlags usage, VkSampleCountFlagBits samples)
+{
+	return img_make(v, im, w, h, 1, fmt, usage, samples);
+}
+
+enum result img_create_layers(struct vk *v, struct img *im, uint32_t w, uint32_t h,
+			      uint32_t layers, VkFormat fmt, VkImageUsageFlags usage)
+{
+	return img_make(v, im, w, h, layers, fmt, usage, VK_SAMPLE_COUNT_1_BIT);
 }
 
 enum result shader_create(struct vk *v, VkShaderModule *m, const uint32_t *code, size_t size)
@@ -412,6 +443,30 @@ enum result cmd_submit_wait(struct vk *v, VkCommandBuffer cb)
 	return r;
 }
 
+enum result cmd_submit_async(struct vk *v, VkCommandBuffer cb, VkFence *fence)
+{
+	VkSubmitInfo si = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.commandBufferCount = 1,
+		.pCommandBuffers = &cb,
+	};
+	VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+
+	VK_CHECK(v, vkEndCommandBuffer(cb));
+	VK_CHECK(v, vkCreateFence(v->dev, &fci, nullptr, fence));
+	VK_CHECK(v, vkQueueSubmit(v->queue, 1, &si, *fence));
+	return R_PASS;
+}
+
+enum result fence_wait(struct vk *v, VkFence fence, uint64_t timeout_ns)
+{
+	enum result r = VK_TRY(v, vkWaitForFences(v->dev, 1, &fence, VK_TRUE, timeout_ns));
+
+	if (r != R_TIMEOUT)
+		vkDestroyFence(v->dev, fence, nullptr);
+	return r;
+}
+
 void img_barrier(VkCommandBuffer cb, const struct img *im, VkImageLayout from, VkImageLayout to,
 		 VkAccessFlags src_access, VkAccessFlags dst_access,
 		 VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage)
@@ -452,7 +507,222 @@ void cmd_copy_to_buffer(VkCommandBuffer cb, const struct img *im, const struct b
 			     nullptr, 1, &hb, 0, nullptr);
 }
 
+void cmd_copy_layer_to_buffer(VkCommandBuffer cb, const struct img *im, uint32_t layer,
+			      const struct buf *b, VkDeviceSize off)
+{
+	VkBufferImageCopy c = {
+		.bufferOffset = off,
+		.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 },
+		.imageExtent = { im->w, im->h, 1 },
+	};
+	VkBufferMemoryBarrier hb = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+		.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.buffer = b->b,
+		.size = VK_WHOLE_SIZE,
+	};
+
+	vkCmdCopyImageToBuffer(cb, im->i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b->b, 1, &c);
+	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+			     nullptr, 1, &hb, 0, nullptr);
+}
+
 /* ------------------------------------------------------------ pipelines */
+enum result rp_build(struct vk *v, VkRenderPass *rp, const struct rp_desc *d)
+{
+	uint32_t nc = OPT(d->colors, 1), n = 0;
+	VkSampleCountFlagBits samples = d->samples ? d->samples : VK_SAMPLE_COUNT_1_BIT;
+	bool ms = samples != VK_SAMPLE_COUNT_1_BIT;
+	bool has_depth = d->depth != VK_FORMAT_UNDEFINED;
+	VkAttachmentDescription a[17];
+	VkAttachmentReference cref[8], rref[8], dref;
+
+	if (nc > 8)
+		return R_SETUP;
+	for (uint32_t i = 0; i < nc; i++) {
+		a[n] = (VkAttachmentDescription){
+			.format = d->color,
+			.samples = samples,
+			.loadOp = d->color_load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = d->color_load ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL :
+							 VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = ms ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+					    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		};
+		cref[i] = (VkAttachmentReference){ n++, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	}
+	for (uint32_t i = 0; d->resolve && i < nc; i++) {
+		a[n] = (VkAttachmentDescription){
+			.format = d->color,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		};
+		rref[i] = (VkAttachmentReference){ n++, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	}
+	if (has_depth) {
+		VkAttachmentLoadOp lo = d->depth_load ? VK_ATTACHMENT_LOAD_OP_LOAD :
+							VK_ATTACHMENT_LOAD_OP_CLEAR;
+
+		a[n] = (VkAttachmentDescription){
+			.format = d->depth,
+			.samples = samples,
+			.loadOp = lo,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = d->stencil ? lo : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = d->stencil ? VK_ATTACHMENT_STORE_OP_STORE :
+						       VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = d->depth_load ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL :
+							 VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		};
+		dref = (VkAttachmentReference){ n++, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	}
+	VkSubpassDescription sp = {
+		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+		.colorAttachmentCount = nc,
+		.pColorAttachments = cref,
+		.pResolveAttachments = d->resolve ? rref : nullptr,
+		.pDepthStencilAttachment = has_depth ? &dref : nullptr,
+	};
+	VkSubpassDependency dep[2] = {
+		{
+			.srcSubpass = VK_SUBPASS_EXTERNAL,
+			.dstSubpass = 0,
+			.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
+					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+					VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+					 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+					 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+					 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+					 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+					 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		},
+		{
+			.srcSubpass = 0,
+			.dstSubpass = VK_SUBPASS_EXTERNAL,
+			.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+			.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+		},
+	};
+	VkRenderPassCreateInfo rci = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+		.attachmentCount = n,
+		.pAttachments = a,
+		.subpassCount = 1,
+		.pSubpasses = &sp,
+		.dependencyCount = 2,
+		.pDependencies = dep,
+	};
+
+	VK_CHECK(v, vkCreateRenderPass(v->dev, &rci, nullptr, rp));
+	vk_track(v, OBJ_RENDER_PASS, H2U(*rp));
+	return R_PASS;
+}
+
+enum result fb_create_views(struct vk *v, VkFramebuffer *fb, VkRenderPass rp,
+			    const VkImageView *views, uint32_t n, uint32_t w, uint32_t h,
+			    uint32_t layers)
+{
+	VkFramebufferCreateInfo fci = {
+		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		.renderPass = rp,
+		.attachmentCount = n,
+		.pAttachments = views,
+		.width = w,
+		.height = h,
+		.layers = layers,
+	};
+
+	VK_CHECK(v, vkCreateFramebuffer(v->dev, &fci, nullptr, fb));
+	vk_track(v, OBJ_FRAMEBUFFER, H2U(*fb));
+	return R_PASS;
+}
+
+enum result desc_create(struct vk *v, const VkDescriptorSetLayoutBinding *b, uint32_t n,
+			VkDescriptorSetLayout *dsl, VkDescriptorSet *set)
+{
+	VkDescriptorPoolSize ps[16];
+	uint32_t np = 0;
+
+	for (uint32_t i = 0; i < n; i++) {
+		uint32_t k = 0;
+
+		while (k < np && ps[k].type != b[i].descriptorType)
+			k++;
+		if (k == np) {
+			if (np == 16)
+				return R_SETUP;
+			ps[np++] = (VkDescriptorPoolSize){ b[i].descriptorType, 0 };
+		}
+		ps[k].descriptorCount += b[i].descriptorCount;
+	}
+	VkDescriptorSetLayoutCreateInfo dci = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = n,
+		.pBindings = b,
+	};
+	VK_CHECK(v, vkCreateDescriptorSetLayout(v->dev, &dci, nullptr, dsl));
+	vk_track(v, OBJ_SET_LAYOUT, H2U(*dsl));
+	VkDescriptorPool pool;
+	VkDescriptorPoolCreateInfo pci = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.maxSets = 1,
+		.poolSizeCount = np,
+		.pPoolSizes = ps,
+	};
+	VK_CHECK(v, vkCreateDescriptorPool(v->dev, &pci, nullptr, &pool));
+	vk_track(v, OBJ_DESC_POOL, H2U(pool));
+	VkDescriptorSetAllocateInfo dai = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool = pool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = dsl,
+	};
+	VK_CHECK(v, vkAllocateDescriptorSets(v->dev, &dai, set));
+	return R_PASS;
+}
+
+enum result sampler_create(struct vk *v, const VkSamplerCreateInfo *ci, VkSampler *s)
+{
+	VK_CHECK(v, vkCreateSampler(v->dev, ci, nullptr, s));
+	vk_track(v, OBJ_SAMPLER, H2U(*s));
+	return R_PASS;
+}
+
+enum result run_fresh(const struct opts *o, test_fn fn, struct report *r)
+{
+	struct vk v2;
+	struct report r2 = { 0 };
+	enum result res = vk_init(&v2, o);
+
+	if (res == R_PASS)
+		res = fn(&v2, o, &r2);
+	vk_fini(&v2);
+	r->frames += r2.frames;
+	r->checked += r2.checked;
+	r->mismatches += r2.mismatches;
+	if (res != R_PASS && res != R_SKIP)
+		snprintf(r->detail, sizeof(r->detail), "%.180s", r2.detail);
+	return res;
+}
+
 enum result rp_create(struct vk *v, VkRenderPass *rp, VkFormat color, VkFormat depth)
 {
 	VkAttachmentDescription a[2] = {
@@ -546,6 +816,77 @@ enum result layout_create(struct vk *v, VkPipelineLayout *l, VkShaderStageFlags 
 	return R_PASS;
 }
 
+double now_ms(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6;
+}
+
+enum result compute_pipeline(struct vk *v, const uint32_t *code, size_t size, uint32_t pc_size,
+			     const struct buf *ssbo, VkPipelineLayout *l, VkPipeline *p,
+			     VkDescriptorSet *set)
+{
+	VkShaderModule cs;
+	VkDescriptorSetLayout dsl;
+	VkDescriptorPool pool;
+
+	CHECK(shader_create(v, &cs, code, size));
+	VkDescriptorSetLayoutBinding bind = {
+		.binding = 0,
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		.descriptorCount = 1,
+		.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+	};
+	VkDescriptorSetLayoutCreateInfo dci = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = 1,
+		.pBindings = &bind,
+	};
+	VK_CHECK(v, vkCreateDescriptorSetLayout(v->dev, &dci, nullptr, &dsl));
+	vk_track(v, OBJ_SET_LAYOUT, H2U(dsl));
+	VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 };
+	VkDescriptorPoolCreateInfo pci = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.maxSets = 1,
+		.poolSizeCount = 1,
+		.pPoolSizes = &ps,
+	};
+	VK_CHECK(v, vkCreateDescriptorPool(v->dev, &pci, nullptr, &pool));
+	vk_track(v, OBJ_DESC_POOL, H2U(pool));
+	VkDescriptorSetAllocateInfo dai = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool = pool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = &dsl,
+	};
+	VK_CHECK(v, vkAllocateDescriptorSets(v->dev, &dai, set));
+	VkDescriptorBufferInfo dbi = { ssbo->b, 0, VK_WHOLE_SIZE };
+	VkWriteDescriptorSet wr = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = *set,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		.pBufferInfo = &dbi,
+	};
+	vkUpdateDescriptorSets(v->dev, 1, &wr, 0, nullptr);
+	CHECK(layout_create(v, l, VK_SHADER_STAGE_COMPUTE_BIT, pc_size, &dsl));
+	VkComputePipelineCreateInfo cci = {
+		.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+		.stage = {
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_COMPUTE_BIT,
+			.module = cs,
+			.pName = "main",
+		},
+		.layout = *l,
+	};
+	VK_CHECK(v, vkCreateComputePipelines(v->dev, VK_NULL_HANDLE, 1, &cci, nullptr, p));
+	vk_track(v, OBJ_PIPELINE, H2U(*p));
+	return R_PASS;
+}
+
 enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 {
 	VkPipelineShaderStageCreateInfo st[2] = {
@@ -559,7 +900,7 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 	};
 	VkPipelineInputAssemblyStateCreateInfo ia = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+		.topology = d->topology ? *d->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
 	};
 	VkPipelineViewportStateCreateInfo vp = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -575,19 +916,36 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 	};
 	VkPipelineMultisampleStateCreateInfo ms = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+		.rasterizationSamples = d->samples ? d->samples : VK_SAMPLE_COUNT_1_BIT,
 	};
 	VkPipelineDepthStencilStateCreateInfo ds = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
 		.depthTestEnable = d->depth,
-		.depthWriteEnable = d->depth,
-		.depthCompareOp = VK_COMPARE_OP_LESS,
+		.depthWriteEnable = d->depth && !d->depth_no_write,
+		.depthCompareOp = d->depth_op ? *d->depth_op : VK_COMPARE_OP_LESS,
+		.stencilTestEnable = d->stencil != nullptr,
 	};
-	VkPipelineColorBlendAttachmentState cba = { .colorWriteMask = 0xF };
+	if (d->stencil) {
+		ds.front = *d->stencil;
+		ds.back = *d->stencil;
+	}
+	VkPipelineColorBlendAttachmentState cba[8];
+
+	for (uint32_t i = 0; i < 8; i++)
+		cba[i] = (VkPipelineColorBlendAttachmentState){
+			.blendEnable = d->blend_add,
+			.srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+			.dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+			.colorBlendOp = VK_BLEND_OP_ADD,
+			.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+			.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+			.alphaBlendOp = VK_BLEND_OP_ADD,
+			.colorWriteMask = 0xF,
+		};
 	VkPipelineColorBlendStateCreateInfo cb = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-		.attachmentCount = 1,
-		.pAttachments = &cba,
+		.attachmentCount = OPT(d->colors, 1),
+		.pAttachments = cba,
 	};
 	VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 	VkPipelineDynamicStateCreateInfo dy = {
@@ -599,7 +957,7 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 		.stageCount = 2,
 		.pStages = st,
-		.pVertexInputState = &vi,
+		.pVertexInputState = d->vertex_input ? d->vertex_input : &vi,
 		.pInputAssemblyState = &ia,
 		.pViewportState = &vp,
 		.pRasterizationState = &rs,
@@ -609,6 +967,7 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 		.pDynamicState = &dy,
 		.layout = d->layout,
 		.renderPass = d->rp,
+		.subpass = d->subpass,
 	};
 
 	VK_CHECK(v, vkCreateGraphicsPipelines(v->dev, VK_NULL_HANDLE, 1, &gci, nullptr, p));
@@ -617,26 +976,63 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 }
 
 /* ------------------------------------------------------------ checking */
-enum result check_rgba(struct vk *v, struct report *r, const char *what, const uint8_t *px,
-		       uint32_t w, uint32_t h, expect_fn fn, const void *ctx)
+enum result check_rgba_step(struct vk *v, struct report *r, const char *what, const uint8_t *px,
+			    uint32_t w, uint32_t h, uint32_t step, expect_fn fn, const void *ctx)
+{
+	uint64_t bad = 0, n = 0;
+
+	if (!step)
+		step = 1;
+	for (uint64_t i = 0; i < (uint64_t)w * h; i += step) {
+		uint32_t x = (uint32_t)(i % w), y = (uint32_t)(i / w);
+		const uint8_t *p = px + i * 4;
+		struct rgba e = fn(x, y, ctx);
+
+		n++;
+		if (p[0] == e.r && p[1] == e.g && p[2] == e.b && p[3] == e.a)
+			continue;
+		if (bad < 8 && v->verbose >= 0)
+			fprintf(stderr,
+				"vkfwtest: %s: (%" PRIu32 ",%" PRIu32 ") got %02x%02x%02x%02x"
+				" expected %02x%02x%02x%02x\n",
+				what, x, y, p[0], p[1], p[2], p[3], e.r, e.g, e.b, e.a);
+		bad++;
+	}
+	r->checked += n;
+	r->mismatches += bad;
+	if (bad) {
+		snprintf(r->detail, sizeof(r->detail), "%s: %" PRIu64 " of %" PRIu64 " pixels wrong",
+			 what, bad, n);
+		return R_MISMATCH;
+	}
+	return R_PASS;
+}
+
+static bool near(uint8_t a, uint8_t b, uint32_t tol)
+{
+	return (uint32_t)(a > b ? a - b : b - a) <= tol;
+}
+
+enum result check_rgba_tol(struct vk *v, struct report *r, const char *what, const uint8_t *px,
+			   uint32_t w, uint32_t h, uint32_t tol, expect_fn fn, const void *ctx)
 {
 	uint64_t bad = 0;
 
-	for (uint32_t y = 0; y < h; y++) {
+	for (uint32_t y = 0; y < h; y++)
 		for (uint32_t x = 0; x < w; x++) {
 			const uint8_t *p = px + ((size_t)y * w + x) * 4;
 			struct rgba e = fn(x, y, ctx);
 
-			if (p[0] == e.r && p[1] == e.g && p[2] == e.b && p[3] == e.a)
+			if (near(p[0], e.r, tol) && near(p[1], e.g, tol) && near(p[2], e.b, tol) &&
+			    near(p[3], e.a, tol))
 				continue;
 			if (bad < 8 && v->verbose >= 0)
 				fprintf(stderr,
 					"vkfwtest: %s: (%" PRIu32 ",%" PRIu32 ") got %02x%02x%02x%02x"
-					" expected %02x%02x%02x%02x\n",
-					what, x, y, p[0], p[1], p[2], p[3], e.r, e.g, e.b, e.a);
+					" expected %02x%02x%02x%02x (+-%" PRIu32 ")\n",
+					what, x, y, p[0], p[1], p[2], p[3], e.r, e.g, e.b, e.a, tol);
 			bad++;
 		}
-	}
 	r->checked += (uint64_t)w * h;
 	r->mismatches += bad;
 	if (bad) {
@@ -645,4 +1041,10 @@ enum result check_rgba(struct vk *v, struct report *r, const char *what, const u
 		return R_MISMATCH;
 	}
 	return R_PASS;
+}
+
+enum result check_rgba(struct vk *v, struct report *r, const char *what, const uint8_t *px,
+		       uint32_t w, uint32_t h, expect_fn fn, const void *ctx)
+{
+	return check_rgba_step(v, r, what, px, w, h, 1, fn, ctx);
 }

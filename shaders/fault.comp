@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// Controlled MMU fault: write and read far beyond the bound storage buffer
+// (no robust buffer access), at an offset of gigabytes.
+#version 450
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer B { uint data[]; } b;
+layout(push_constant) uniform PC { uint index; } pc;
+
+void main()
+{
+	b.data[pc.index] = 0xDEADBEEFu;
+	b.data[1] = b.data[pc.index + 1u];
+}

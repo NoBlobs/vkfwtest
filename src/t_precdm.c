@@ -27,68 +27,13 @@ enum result test_precdm(struct vk *v, const struct opts *o, struct report *r)
 	uint32_t seed = OPT(o->seed, 1), iters = OPT(o->iters, 16);
 	uint32_t n = groups * 64;
 	struct buf b;
-	VkShaderModule cs;
-	VkDescriptorSetLayout dsl;
-	VkDescriptorPool pool;
 	VkDescriptorSet set;
 	VkPipelineLayout layout;
 	VkPipeline pipe;
 
 	CHECK(buf_create(v, &b, (VkDeviceSize)n * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true));
-	CHECK(shader_create(v, &cs, spv_fill_comp, sizeof(spv_fill_comp)));
-
-	VkDescriptorSetLayoutBinding bind = {
-		.binding = 0,
-		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-		.descriptorCount = 1,
-		.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-	};
-	VkDescriptorSetLayoutCreateInfo dci = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		.bindingCount = 1,
-		.pBindings = &bind,
-	};
-	VK_CHECK(v, vkCreateDescriptorSetLayout(v->dev, &dci, nullptr, &dsl));
-	vk_track(v, OBJ_SET_LAYOUT, H2U(dsl));
-	VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 };
-	VkDescriptorPoolCreateInfo pci = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1,
-		.poolSizeCount = 1,
-		.pPoolSizes = &ps,
-	};
-	VK_CHECK(v, vkCreateDescriptorPool(v->dev, &pci, nullptr, &pool));
-	vk_track(v, OBJ_DESC_POOL, H2U(pool));
-	VkDescriptorSetAllocateInfo dai = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-		.descriptorPool = pool,
-		.descriptorSetCount = 1,
-		.pSetLayouts = &dsl,
-	};
-	VK_CHECK(v, vkAllocateDescriptorSets(v->dev, &dai, &set));
-	VkDescriptorBufferInfo dbi = { b.b, 0, VK_WHOLE_SIZE };
-	VkWriteDescriptorSet wr = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = set,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-		.pBufferInfo = &dbi,
-	};
-	vkUpdateDescriptorSets(v->dev, 1, &wr, 0, nullptr);
-
-	CHECK(layout_create(v, &layout, VK_SHADER_STAGE_COMPUTE_BIT, sizeof(struct fill_pc), &dsl));
-	VkComputePipelineCreateInfo cci = {
-		.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-		.stage = {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.stage = VK_SHADER_STAGE_COMPUTE_BIT,
-			.module = cs,
-			.pName = "main",
-		},
-		.layout = layout,
-	};
-	VK_CHECK(v, vkCreateComputePipelines(v->dev, VK_NULL_HANDLE, 1, &cci, nullptr, &pipe));
-	vk_track(v, OBJ_PIPELINE, H2U(pipe));
+	CHECK(compute_pipeline(v, spv_fill_comp, sizeof(spv_fill_comp), sizeof(struct fill_pc), &b,
+			       &layout, &pipe, &set));
 
 	for (uint32_t f = 0; f < frames; f++) {
 		struct fill_pc pc = { seed + f * 31u, iters };

@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// Controlled lockup: spins while data[0] == 1, which the host sets and never
+// clears. The firmware's watchdog must recover the GPU.
+#version 450
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) coherent buffer B { uint data[]; } b;
+
+void main()
+{
+	while (b.data[0] == 1u)
+		b.data[1] += 1u;
+}

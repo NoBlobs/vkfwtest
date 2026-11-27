@@ -18,7 +18,7 @@ VK_LIBS   := $(shell $(PKG_CONFIG) --libs vulkan 2>/dev/null || echo -lvulkan)
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=gnu23 -Wall -Wextra -Werror -Wshadow -Wformat=2 -I$(BUILD) -Isrc $(VK_CFLAGS)
 LDFLAGS ?=
-LDLIBS  += $(VK_LIBS) -lpthread
+LDLIBS  += $(VK_LIBS) -lpthread -lm
 
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
@@ -32,7 +32,8 @@ $(BUILD)/vkfwtest: $(OBJS)
 
 # shaders are embedded as uint32_t arrays: no shader compiler on the target
 $(BUILD)/%.h: shaders/% | $(BUILD)
-	$(GLSLANG) -V --quiet --vn spv_$(subst .,_,$*) -o $@ $<
+	$(GLSLANG) -V --quiet --vn spv_$(subst .,_,$*) -o $@.tmp $<
+	sed 's/^const uint32_t/static const uint32_t/' $@.tmp > $@ && rm -f $@.tmp
 
 $(BUILD)/%.o: src/%.c src/vkfwtest.h $(SPV_H) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
