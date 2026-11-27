@@ -62,6 +62,11 @@ vkfwtest [options] <test|group:NAME>... | all | list
 ```
 
 Each test creates its own `VkDevice`, so the kernel creates fresh firmware contexts for it.
+
+**Shader caches.** On NVIDIA, run with `__GL_SHADER_DISK_CACHE=0`: the on-disk cache can
+return a pipeline built without `VK_PIPELINE_CREATE_DISPATCH_BASE_BIT` for the same SPIR-V,
+and `compute-dims` then fails. On Mesa drivers, `MESA_SHADER_CACHE_DISABLE=true` does the
+same, when a cached pipeline must be ruled out.
 Output is one line per test:
 
 ```
