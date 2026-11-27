@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// Storage image atomicAdd + imageLoad verification.
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, r32ui) uniform uimage2D img;
+layout(std430, set = 0, binding = 1) buffer O { uint v; } o;
+
+void main()
+{
+	imageAtomicAdd(img, ivec2(0, 0), 1u);
+	memoryBarrierImage();
+	barrier();
+	if (gl_LocalInvocationID.x == 0u)
+		o.v = imageLoad(img, ivec2(0, 0)).x;
+}

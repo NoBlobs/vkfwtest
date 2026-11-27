@@ -89,6 +89,8 @@ struct vk {
 	bool has_multidraw;             /* multiDrawIndirect enabled */
 	VkPhysicalDeviceFeatures feat;  /* the base features enabled */
 	bool has_multiview, has_timeline;
+	bool has_push_desc, has_dyn_rendering, has_ds_resolve, has_ext_fence_fd;
+	bool has_sparse_queue;
 	VkPhysicalDeviceSubgroupProperties subgroup;
 	const char *dump;               /* --dump directory, or null */
 	const char *test;               /* name of the running test (dump file names) */
@@ -326,6 +328,8 @@ enum result test_memory(struct vk *v, const struct opts *o, struct report *r);
 enum result test_robust(struct vk *v, const struct opts *o, struct report *r);
 enum result test_idle_resume(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_frag(struct vk *v, const struct opts *o, struct report *r);
+enum result test_hwr_3d_fault(struct vk *v, const struct opts *o, struct report *r);
+enum result test_sparse(struct vk *v, const struct opts *o, struct report *r);
 
 /* grid.c: the tiled-triangle workload shared by pre-ta and bigpb */
 struct grid {

@@ -77,7 +77,7 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 		.queueCount = v->nqueues,
 		.pQueuePriorities = prios,
 	};
-	const char *ext[2];
+	const char *ext[8];
 	uint32_t next = 0, n = 0;
 	VkExtensionProperties *e;
 
@@ -89,6 +89,38 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	v->has_output_layer = has_ext(e, n, VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
 	if (v->has_output_layer)
 		ext[next++] = VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME;
+	v->has_push_desc = has_ext(e, n, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+	if (v->has_push_desc)
+		ext[next++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+	bool ext_dyn = has_ext(e, n, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+
+	if (ext_dyn)
+		ext[next++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+	v->has_ds_resolve = v->props.apiVersion >= VK_API_VERSION_1_2;
+	if (!v->has_ds_resolve && has_ext(e, n, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) &&
+	    has_ext(e, n, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) {
+		ext[next++] = VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME;
+		ext[next++] = VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME;
+		v->has_ds_resolve = true;
+	}
+	if (has_ext(e, n, VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME)) {
+		VkPhysicalDeviceExternalFenceInfo efi = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO,
+			.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
+		};
+		VkExternalFenceProperties efp = {
+			.sType = VK_STRUCTURE_TYPE_EXTERNAL_FENCE_PROPERTIES,
+		};
+		vkGetPhysicalDeviceExternalFenceProperties(v->phys, &efi, &efp);
+		if ((efp.externalFenceFeatures &
+		     (VK_EXTERNAL_FENCE_FEATURE_EXPORTABLE_BIT |
+		      VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT)) ==
+		    (VK_EXTERNAL_FENCE_FEATURE_EXPORTABLE_BIT |
+		     VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT)) {
+			ext[next++] = VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME;
+			v->has_ext_fence_fd = true;
+		}
+	}
 	if (with_prio) {
 		if (has_ext(e, n, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
 			ext[next++] = VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME;
@@ -115,16 +147,28 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	want.vertexPipelineStoresAndAtomics = have.vertexPipelineStoresAndAtomics;
 	want.depthClamp = have.depthClamp;
 	want.depthBiasClamp = have.depthBiasClamp;
+	want.depthBounds = have.depthBounds;
+	want.wideLines = have.wideLines;
+	want.largePoints = have.largePoints;
 	want.textureCompressionETC2 = have.textureCompressionETC2;
+	want.textureCompressionASTC_LDR = have.textureCompressionASTC_LDR;
 	want.imageCubeArray = have.imageCubeArray;
 	want.sampleRateShading = have.sampleRateShading;
 	want.samplerAnisotropy = have.samplerAnisotropy;
+	want.sparseBinding = have.sparseBinding;
+	want.sparseResidencyBuffer = have.sparseResidencyBuffer;
 	want.robustBufferAccess = o->robust && have.robustBufferAccess;
 	v->has_precise_occlusion = have.occlusionQueryPrecise;
 	v->has_multidraw = have.multiDrawIndirect;
 	v->feat = want;
 
-	/* 1.1 / 1.2 features: multiview, timeline semaphores */
+	/* 1.1 / 1.2 / 1.3 features: multiview, timeline semaphores, dynamic rendering */
+	VkPhysicalDeviceDynamicRenderingFeatures fdr = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+	};
+	VkPhysicalDeviceDynamicRenderingFeatures edr = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+	};
 	VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
 	VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
 						 .pNext = &f12 };
@@ -137,18 +181,32 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	void *chain = nullptr;
 
 	if (v->props.apiVersion >= VK_API_VERSION_1_2) {
+		if (v->props.apiVersion >= VK_API_VERSION_1_3 || ext_dyn)
+			f12.pNext = &fdr;
 		f2.pNext = &f11;
 		vkGetPhysicalDeviceFeatures2(v->phys, &f2);
 		e11.multiview = f11.multiview;
 		e12.timelineSemaphore = f12.timelineSemaphore;
 		v->has_multiview = f11.multiview;
 		v->has_timeline = f12.timelineSemaphore;
+		if ((v->props.apiVersion >= VK_API_VERSION_1_3 || ext_dyn) && fdr.dynamicRendering) {
+			edr.dynamicRendering = VK_TRUE;
+			e12.pNext = &edr;
+			v->has_dyn_rendering = true;
+		}
 		chain = &e11;
 	} else if (v->props.apiVersion >= VK_API_VERSION_1_1) {
+		if (ext_dyn)
+			mv.pNext = &fdr;
 		f2.pNext = &mv;
 		vkGetPhysicalDeviceFeatures2(v->phys, &f2);
 		emv.multiview = mv.multiview;
 		v->has_multiview = mv.multiview;
+		if (ext_dyn && fdr.dynamicRendering) {
+			edr.dynamicRendering = VK_TRUE;
+			emv.pNext = &edr;
+			v->has_dyn_rendering = true;
+		}
 		chain = &emv;
 	}
 	VkDeviceCreateInfo dci = {
@@ -236,6 +294,7 @@ enum result vk_init(struct vk *v, const struct opts *o)
 		    (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) {
 			v->qfam = i;
 			v->nqueues = qf[i].queueCount >= 2 ? 2 : 1;
+			v->has_sparse_queue = (qf[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
 			break;
 		}
 	if (v->qfam == UINT32_MAX) {

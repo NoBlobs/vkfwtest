@@ -97,6 +97,8 @@ static const struct test tests[] = {
 	  "semaphores between submissions and queues, timeline semaphores, events, 500 small submits" },
 	{ "memory", nullptr, "memory", test_memory, true,
 	  "a large allocation, many small ones, map/unmap in a loop" },
+	{ "sparse", nullptr, "memory", test_sparse, true,
+	  "sparse buffer binding and residency (when supported)" },
 	{ "robust", nullptr, "robust", test_robust, true,
 	  "robustBufferAccess: out-of-bounds reads stay in bounds or read zero, no fault" },
 	{ "idle-resume", nullptr, "power", test_idle_resume, true,
@@ -115,6 +117,8 @@ static const struct test tests[] = {
 	  "[not in all] MMU page fault -> device lost, then clean renders on new devices" },
 	{ "hwr-frag", nullptr, "hwr", test_hwr_frag, false,
 	  "[not in all] fragment-shader lockup -> device lost, then clean renders on new devices" },
+	{ "hwr-3d-fault", nullptr, "hwr", test_hwr_3d_fault, false,
+	  "[not in all] 3D-pipe MMU page fault -> device lost, then clean renders on new devices" },
 	{ "prio-3d", nullptr, "prio", test_prio_3d, false,
 	  "[not in all] long LOW-priority fragment job vs HIGH-priority probes (preemption)" },
 	{ "prio-ta", nullptr, "prio", test_prio_ta, false,
@@ -471,18 +475,35 @@ int main(int argc, char **argv)
 
 	enum result worst = R_PASS;
 	uint32_t count[6] = { 0 };      /* pass, mismatch, timeout, lost, setup, skip */
+	struct { const char *name; uint32_t pass, total; } grps[16];
+	size_t ngrps = 0;
 	static struct vk shared;
 	uint32_t reps = o.bench ? o.bench : OPT(o.repeat, 1);
 	bool stop = false;
 
 	for (size_t i = 0; i < n && !stop; i++) {
 		double tmin = 1e30, tmax = 0, tsum = 0;
+		size_t gi = 0;
+
+		while (gi < ngrps && strcmp(grps[gi].name, run[i]->group))
+			gi++;
+		if (gi == ngrps && ngrps < 16) {
+			grps[ngrps].name = run[i]->group;
+			grps[ngrps].pass = 0;
+			grps[ngrps].total = 0;
+			ngrps++;
+		}
 
 		for (uint32_t it = 0; it < reps; it++) {
 			double ms;
 			enum result r = run_one(run[i], &o, it, o.keep_device ? &shared : nullptr, &ms);
 
 			count[r == R_SKIP ? 5 : (int)r]++;
+			if (gi < ngrps) {
+				grps[gi].total++;
+				if (r == R_PASS)
+					grps[gi].pass++;
+			}
 			if (severity(r) > severity(worst) && r != R_SKIP)
 				worst = r;
 			tmin = ms < tmin ? ms : tmin;
@@ -509,12 +530,23 @@ int main(int argc, char **argv)
 
 	if (worst == R_PASS && count[5] && !count[0])
 		code = R_SKIP;
-	if (o.json)
+	if (o.json) {
 		printf("{\"summary\":{\"pass\":%u,\"fail\":%u,\"timeout\":%u,\"lost\":%u,\"error\":%u,"
-		       "\"skip\":%u,\"code\":%d}}\n", count[0], count[1], count[2], count[3], count[4],
-		       count[5], code);
-	else if (n > 1)
+		       "\"skip\":%u,\"code\":%d,\"groups\":{", count[0], count[1], count[2], count[3],
+		       count[4], count[5], code);
+		for (size_t gi = 0; gi < ngrps; gi++)
+			printf("%s\"%s\":{\"pass\":%u,\"total\":%u}", gi ? "," : "",
+			       grps[gi].name, grps[gi].pass, grps[gi].total);
+		printf("}}}\n");
+	} else if (n > 1) {
 		printf("== %u pass, %u fail, %u timeout, %u lost, %u error, %u skip\n", count[0],
 		       count[1], count[2], count[3], count[4], count[5]);
+		if (ngrps > 1) {
+			printf("== groups:");
+			for (size_t gi = 0; gi < ngrps; gi++)
+				printf(" %s %u/%u", grps[gi].name, grps[gi].pass, grps[gi].total);
+			printf("\n");
+		}
+	}
 	return code;
 }

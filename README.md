@@ -36,22 +36,28 @@ types, and byte-wise checks.
 ## Usage
 
 ```
-vkfwtest [options] <test>... | all | list
+vkfwtest [options] <test|group:NAME>... | all | list
   all runs every test except hwr-* and prio-*
+  groups: render compute transfer texture sync memory robust power stress hwr prio
 
-  -f, --frames N      frames / rounds per test (default per test)
-  -s, --size WxH      render target size (or N for NxN)
-  -t, --tris N[K|M]   triangles (pre-ta, bigpb)
-  -i, --iters N       LCG iterations per pixel / invocation
-  -g, --groups N      compute workgroups (pre-cdm)
-  -S, --seed N        pattern seed (default 1)
-  -T, --timeout SEC   per-fence timeout (default 60)
-  -r, --repeat N      run each test N times
-  -p, --priority P    low|medium|high (VK_KHR/EXT_global_priority)
-  -d, --device N      physical device index (default: first PowerVR, else 0)
+  -f, --frames N         frames / rounds per test (default per test)
+  -s, --size WxH         render target size (or N for NxN)
+  -t, --tris N[K|M]      triangles (pre-ta, bigpb)
+  -i, --iters N          LCG iterations per pixel / invocation
+  -g, --groups N         compute workgroups (pre-cdm, indirect)
+  -S, --seed N           pattern seed (default 1)
+  -T, --timeout SEC      per-fence timeout (default 60)
+  -L, --test-timeout SEC abort the run if one test takes longer (exit 2)
+  -r, --repeat N         run each test N times
+  -b, --bench N          run each test N times and print min/avg/max times
+  -p, --priority P       low|medium|high (VK_KHR/EXT_global_priority)
+  -d, --device N         physical device index (default: first PowerVR, else 0)
+  -K, --keep-device      run all the tests on one device (in order)
+  -I, --idle-ms MS       idle-resume: idle time (default: autosuspend delay + 500)
+  -D, --dump DIR         write got/expected/diff PPM images of mismatches to DIR
   -P, --require-preempt  prio-*: fail unless the probes overtake the long job
-  -k, --keep-going    run the remaining tests after a failure
-  -j, --json          one JSON line per test on stdout
+  -k, --keep-going       run the remaining tests after a failure
+  -j, --json             one JSON line per test, and a summary line, on stdout
   -v, --verbose / -q, --quiet / -V, --version / -h, --help
 ```
 
@@ -95,18 +101,36 @@ On a mismatch, the first 8 wrong values are printed on stderr as `(x,y) got … 
 | `rta` | a 6-layer render target (render-target arrays): the render pass clear, per-layer `vkCmdClearAttachments`, and, with `VK_EXT_shader_viewport_index_layer`, one `gl_Layer` draw per layer | every pixel of every layer |
 | `texture` | texture unit: a 37×23 (NPOT) texture with REPEAT, MIRRORED_REPEAT, CLAMP_TO_EDGE, CLAMP_TO_BORDER (white, transparent), LINEAR halfway between texels, and 6 mip levels | every texel or border colour; the linear case allows ±1 |
 | `zs-load` | depth + stencil (D24S8 or D32S8, else depth only) stored by one render pass and loaded by the next two | the depth test and the stencil test of the later passes select the expected halves |
-| `msaa` | 4× rendering resolved by a resolve attachment; a triangle edge along the diagonal | full pixels exact; diagonal pixels (2 of 4 standard sample positions) equal the average ±1 |
+| `msaa` | 2×/4×/8× rendering resolved by a resolve attachment + depth resolve; a 4× triangle edge along the diagonal | full pixels exact; 4× diagonal pixels equal the average ±1; resolved depth exact |
 | `mrt` | up to 8 colour attachments written by one subpass | every pixel of every attachment |
 | `sizes` | render targets of 1×1, 7×5, 33×17, 97×61, 256×1, 1×256, 1000×3, 1920×1080, 4096×4096, plus a partial `renderArea` with LOAD | a unique per-pixel value everywhere; pixels outside the render area keep their colour |
 | `vertex` | vertex and index buffers (16- and 32-bit indices, `firstIndex`, `vertexOffset`, `firstInstance`), instancing, point and line lists | every pixel |
 | `indirect` | `vkCmdDrawIndirect`, `vkCmdDrawIndexedIndirect`, multi-draw indirect (when supported), `vkCmdDispatchIndirect` | the drawn cells; the dispatched words, with a sentinel after them |
 | `queries` | occlusion queries (exact with `occlusionQueryPrecise`), read on the host and copied by the GPU; timestamps | 960 / 0 / 0 samples; increasing timestamps |
 | `formats` | R5G6B5, B8G8R8A8, R8G8B8A8_SRGB, R16G16B16A16_SFLOAT, R32_UINT targets; additive blending; `discard` | the raw bytes of every pixel (sRGB ±1) |
+| `secondary` | secondary command buffers (`VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS`) and partial-rect `vkCmdClearAttachments` between draws | every pixel |
+| `multiview` | `VK_KHR_multiview` (core 1.1): one draw into 2 layers with `gl_ViewIndex` | every pixel of both views |
+| `raster` | viewport offset + negative height, triangle strip + primitive restart, fan, line strip, depth bias/clamp/bounds, wide lines, large points, 4× sample mask, sample shading + alpha-to-coverage, no-attachment pass, dynamic rendering | every pixel and atomic fragment count |
+| `resources` | UBO, dynamic SSBO offset, `r32ui` storage image, uniform/storage texel buffers, buffer + image atomics, shared memory + `barrier()`, fragment `imageLoad`/`imageStore`, push descriptors | every word, texel and sentinel |
+| `compute-dims` | 3D `vkCmdDispatchBase` and largest 1D workgroup size (specialisation constant) with shared-memory reduction | every element of the 3D grid and every workgroup sum |
+| `subgroups` | compute subgroup size, `subgroupElect`, `subgroupBallot`, `subgroupAdd` (when supported) | every invocation |
+| `buffers` | `vkCmdFillBuffer`, `vkCmdUpdateBuffer`, `vkCmdCopyBuffer` (multiple regions, odd sizes/offsets, 1 B) | every byte |
+| `ds-copy` | `vkCmdClearDepthStencilImage` and depth/stencil image ↔ buffer copies | every texel |
+| `blit-mips` | scaled `VK_FILTER_LINEAR` blits (upscale/downscale) and 7-level mip-chain generation | every pixel (±1) |
+| `image-copy` | 3D sub-volume, multi-layer 2D array, and format-compatible (`R32_UINT` → `RGBA8`) copies | every texel |
+| `texture2` | cube map + cube array, 3D, 2D array, shadow compare, `textureGather`, integer/float `texelFetch`, unnormalized coords, ETC2, ASTC 4×4, anisotropic sampler (when supported) | every probe |
+| `sync` | binary semaphores (multi-queue when available), timeline semaphores, host/GPU events, 500 small fence-synced submits, external `sync_file` fence export/import | every word |
+| `memory` | large device-local allocation (up to 64 MiB), 256 small allocations, 200 map/unmap cycles | every checked word |
+| `sparse` | sparse buffer binding and residency (`vkQueueBindSparse`) when supported | every word of the bound sparse page |
+| `robust` | `robustBufferAccess`: out-of-bounds read returns 0 or in-bounds data, out-of-bounds write discarded, no fault | all 16 words |
+| `idle-resume` | render, wait past runtime-PM autosuspend delay (`--idle-ms` or sysfs + 500 ms), render again on the same device | every pixel of both renders |
 | `stress` | four threads with a device each, running `multiframe`, `pre-ta`, `pre-cdm` and `xfer` at the same time | the four tests' own checks |
 | `soak` | one device running `multiframe` ×120, `pre-cdm` ×120, `pre-ta` ×20, `xfer` ×10 | the same |
 | `churn` | 20 devices created and destroyed, each with 2 frames and a dispatch | the same |
 | `hwr-lockup` | **not in `all`**. A compute shader that spins forever. The submission must end in `VK_ERROR_DEVICE_LOST` (watchdog recovery); then `multiframe` and `pre-cdm` must pass on new devices, without reloading the driver | device lost, then the two tests |
 | `hwr-fault` | **not in `all`**. A compute shader that writes and reads about 4 GiB beyond its storage buffer: an MMU page fault. Then the same recovery checks as `hwr-lockup` | device lost, then the two tests |
+| `hwr-frag` | **not in `all`**. A fragment shader that spins forever. Must end in `VK_ERROR_DEVICE_LOST`, then `multiframe` and `pre-cdm` must pass on new devices | device lost, then the two tests |
+| `hwr-3d-fault` | **not in `all`**. A fragment shader that writes and reads far beyond its SSBO: a 3D-pipe MMU page fault. Then the same recovery checks | device lost, then the two tests |
 | `prio-3d`, `prio-ta`, `prio-cdm` | **not in `all`**. A long job calibrated to about 1.5 s on a LOW-priority device, while 10 short probes run on a HIGH-priority device | every output. It reports whether the probes were delayed; with `--require-preempt`, a delay is a failure |
 
 All geometry is generated from `gl_VertexIndex`, with no vertex buffers. Cell edges fall on
