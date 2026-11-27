@@ -77,7 +77,7 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 		.queueCount = v->nqueues,
 		.pQueuePriorities = prios,
 	};
-	const char *ext[8];
+	const char *ext[24];
 	uint32_t next = 0, n = 0;
 	VkExtensionProperties *e;
 
@@ -89,21 +89,25 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	v->has_output_layer = has_ext(e, n, VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
 	if (v->has_output_layer)
 		ext[next++] = VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME;
-	v->has_push_desc = has_ext(e, n, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+	/* extensions that depend on VK_KHR_get_physical_device_properties2: 1.1 only */
+	v->has_push_desc = v->api >= VK_API_VERSION_1_1 &&
+			   has_ext(e, n, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
 	if (v->has_push_desc)
 		ext[next++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
-	bool ext_dyn = has_ext(e, n, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+	bool ext_dyn = v->api >= VK_API_VERSION_1_1 && v->api < VK_API_VERSION_1_3 &&
+		       has_ext(e, n, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
 
 	if (ext_dyn)
 		ext[next++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
-	v->has_ds_resolve = v->props.apiVersion >= VK_API_VERSION_1_2;
-	if (!v->has_ds_resolve && has_ext(e, n, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) &&
+	v->has_ds_resolve = v->api >= VK_API_VERSION_1_2;
+	if (!v->has_ds_resolve && v->api >= VK_API_VERSION_1_1 &&
+	    has_ext(e, n, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) &&
 	    has_ext(e, n, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) {
 		ext[next++] = VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME;
 		ext[next++] = VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME;
 		v->has_ds_resolve = true;
 	}
-	if (has_ext(e, n, VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME)) {
+	if (v->api >= VK_API_VERSION_1_1 && has_ext(e, n, VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME)) {
 		VkPhysicalDeviceExternalFenceInfo efi = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO,
 			.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
@@ -120,6 +124,54 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 			ext[next++] = VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME;
 			v->has_ext_fence_fd = true;
 		}
+	}
+	/* 1.3 / 1.4 items: core at that version, else the extension when offered */
+	bool core13 = v->api >= VK_API_VERSION_1_3, core14 = false;
+	bool x_sync2 = false, x_lr = false, x_i8 = false, x_div = false;
+
+#ifdef VK_API_VERSION_1_4
+	core14 = v->api >= VK_API_VERSION_1_4;
+#endif
+	if (!core13 && v->api >= VK_API_VERSION_1_1 &&
+	    has_ext(e, n, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+		ext[next++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
+		x_sync2 = true;
+	}
+#ifdef VK_KHR_dynamic_rendering_local_read
+	if (!core14 && (core13 || ext_dyn) &&
+	    has_ext(e, n, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME)) {
+		ext[next++] = VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME;
+		x_lr = true;
+	}
+#endif
+#ifdef VK_KHR_index_type_uint8
+	if (!core14 && v->api >= VK_API_VERSION_1_1) {
+		if (has_ext(e, n, VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME))
+			ext[next++] = VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME, x_i8 = true;
+		else if (has_ext(e, n, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME))
+			ext[next++] = VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME, x_i8 = true;
+	}
+#endif
+#ifdef VK_KHR_vertex_attribute_divisor
+	if (!core14 && v->api >= VK_API_VERSION_1_1) {
+		if (has_ext(e, n, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME))
+			ext[next++] = VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, x_div = true;
+		else if (has_ext(e, n, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME))
+			ext[next++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, x_div = true;
+	}
+#endif
+	/* attachment STORE_OP_NONE is core in 1.3; LOAD_OP_NONE in 1.4 */
+	v->has_store_none = core13;
+	v->has_load_none = core14;
+#ifdef VK_KHR_load_store_op_none
+	if (!core14 && has_ext(e, n, VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME)) {
+		ext[next++] = VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+		v->has_load_none = v->has_store_none = true;
+	} else
+#endif
+	if (!core14 && has_ext(e, n, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME)) {
+		ext[next++] = VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+		v->has_load_none = v->has_store_none = true;
 	}
 	if (with_prio) {
 		if (has_ext(e, n, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
@@ -162,53 +214,128 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	v->has_multidraw = have.multiDrawIndirect;
 	v->feat = want;
 
-	/* 1.1 / 1.2 / 1.3 features: multiview, timeline semaphores, dynamic rendering */
-	VkPhysicalDeviceDynamicRenderingFeatures fdr = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
-	};
-	VkPhysicalDeviceDynamicRenderingFeatures edr = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
-	};
+	/*
+	 * Feature structs, queried and enabled only for what the device offers
+	 * (its version, or an extension enabled above). Nothing here is required:
+	 * a 1.0 device gets no chain at all.
+	 */
 	VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-	VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-						 .pNext = &f12 };
-	VkPhysicalDeviceMultiviewFeatures mv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
-	VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-	VkPhysicalDeviceVulkan12Features e12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-	VkPhysicalDeviceVulkan11Features e11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-						 .pNext = &e12 };
-	VkPhysicalDeviceMultiviewFeatures emv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
-	void *chain = nullptr;
+	VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+	VkPhysicalDeviceMultiviewFeatures fmv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+	VkPhysicalDeviceDynamicRenderingFeatures fdr = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
+	VkPhysicalDeviceSynchronization2Features fs2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES };
+#ifdef VK_KHR_dynamic_rendering_local_read
+	VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR flr = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR };
+#endif
+#ifdef VK_KHR_index_type_uint8
+	VkPhysicalDeviceIndexTypeUint8FeaturesKHR fi8 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR };
+#endif
+#ifdef VK_KHR_vertex_attribute_divisor
+	VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdv = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR };
+#endif
+	/* the same structs again, for enabling */
+	VkPhysicalDeviceVulkan12Features e12 = { .sType = f12.sType };
+	VkPhysicalDeviceVulkan11Features e11 = { .sType = f11.sType };
+	VkPhysicalDeviceMultiviewFeatures emv = { .sType = fmv.sType };
+	VkPhysicalDeviceDynamicRenderingFeatures edr = { .sType = fdr.sType };
+	VkPhysicalDeviceSynchronization2Features es2 = { .sType = fs2.sType };
+#ifdef VK_KHR_dynamic_rendering_local_read
+	VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR elr = { .sType = flr.sType };
+#endif
+#ifdef VK_KHR_index_type_uint8
+	VkPhysicalDeviceIndexTypeUint8FeaturesKHR ei8 = { .sType = fi8.sType };
+#endif
+#ifdef VK_KHR_vertex_attribute_divisor
+	VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR edv = { .sType = fdv.sType };
+#endif
+	void *q_head = nullptr, *e_head = nullptr;
+	bool use_dr = core13 || ext_dyn, use_s2 = core13 || x_sync2;
+	bool use_lr = core14 || x_lr, use_i8 = core14 || x_i8, use_dv = core14 || x_div;
 
-	if (v->props.apiVersion >= VK_API_VERSION_1_2) {
-		if (v->props.apiVersion >= VK_API_VERSION_1_3 || ext_dyn)
-			f12.pNext = &fdr;
-		f2.pNext = &f11;
-		vkGetPhysicalDeviceFeatures2(v->phys, &f2);
-		e11.multiview = f11.multiview;
-		e12.timelineSemaphore = f12.timelineSemaphore;
-		v->has_multiview = f11.multiview;
-		v->has_timeline = f12.timelineSemaphore;
-		if ((v->props.apiVersion >= VK_API_VERSION_1_3 || ext_dyn) && fdr.dynamicRendering) {
-			edr.dynamicRendering = VK_TRUE;
-			e12.pNext = &edr;
-			v->has_dyn_rendering = true;
+	(void)use_lr;
+	(void)use_i8;
+	(void)use_dv;
+#define QCHAIN(st) do { (st).pNext = q_head; q_head = &(st); } while (0)
+#define ECHAIN(st) do { (st).pNext = e_head; e_head = &(st); } while (0)
+	if (v->api >= VK_API_VERSION_1_1) {
+		if (v->api >= VK_API_VERSION_1_2) {
+			QCHAIN(f11);
+			QCHAIN(f12);
+		} else {
+			QCHAIN(fmv);
 		}
-		chain = &e11;
-	} else if (v->props.apiVersion >= VK_API_VERSION_1_1) {
-		if (ext_dyn)
-			mv.pNext = &fdr;
-		f2.pNext = &mv;
+		if (use_dr)
+			QCHAIN(fdr);
+		if (use_s2)
+			QCHAIN(fs2);
+#ifdef VK_KHR_dynamic_rendering_local_read
+		if (use_lr)
+			QCHAIN(flr);
+#endif
+#ifdef VK_KHR_index_type_uint8
+		if (use_i8)
+			QCHAIN(fi8);
+#endif
+#ifdef VK_KHR_vertex_attribute_divisor
+		if (use_dv)
+			QCHAIN(fdv);
+#endif
+		VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+						 .pNext = q_head };
+
 		vkGetPhysicalDeviceFeatures2(v->phys, &f2);
-		emv.multiview = mv.multiview;
-		v->has_multiview = mv.multiview;
-		if (ext_dyn && fdr.dynamicRendering) {
-			edr.dynamicRendering = VK_TRUE;
-			emv.pNext = &edr;
-			v->has_dyn_rendering = true;
+		if (v->api >= VK_API_VERSION_1_2) {
+			e11.multiview = f11.multiview;
+			e12.timelineSemaphore = f12.timelineSemaphore;
+			v->has_multiview = f11.multiview;
+			v->has_timeline = f12.timelineSemaphore;
+			ECHAIN(e11);
+			ECHAIN(e12);
+		} else {
+			emv.multiview = fmv.multiview;
+			v->has_multiview = fmv.multiview;
+			ECHAIN(emv);
 		}
-		chain = &emv;
+		if (use_dr && fdr.dynamicRendering) {
+			edr.dynamicRendering = VK_TRUE;
+			v->has_dyn_rendering = true;
+			ECHAIN(edr);
+		}
+		if (use_s2 && fs2.synchronization2) {
+			es2.synchronization2 = VK_TRUE;
+			v->has_sync2 = true;
+			ECHAIN(es2);
+		}
+#ifdef VK_KHR_dynamic_rendering_local_read
+		if (use_lr && v->has_dyn_rendering && flr.dynamicRenderingLocalRead) {
+			elr.dynamicRenderingLocalRead = VK_TRUE;
+			v->has_local_read = true;
+			ECHAIN(elr);
+		}
+#endif
+#ifdef VK_KHR_index_type_uint8
+		if (use_i8 && fi8.indexTypeUint8) {
+			ei8.indexTypeUint8 = VK_TRUE;
+			v->has_index8 = true;
+			ECHAIN(ei8);
+		}
+#endif
+#ifdef VK_KHR_vertex_attribute_divisor
+		if (use_dv && fdv.vertexAttributeInstanceRateDivisor) {
+			edv.vertexAttributeInstanceRateDivisor = VK_TRUE;
+			edv.vertexAttributeInstanceRateZeroDivisor = fdv.vertexAttributeInstanceRateZeroDivisor;
+			v->has_divisor = true;
+			v->has_divisor_zero = fdv.vertexAttributeInstanceRateZeroDivisor;
+			ECHAIN(edv);
+		}
+#endif
 	}
+#undef QCHAIN
+#undef ECHAIN
+	void *chain = e_head;
 	VkDeviceCreateInfo dci = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 		.pNext = chain,
@@ -223,10 +350,24 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 
 enum result vk_init(struct vk *v, const struct opts *o)
 {
+	/*
+	 * Ask for the version the loader offers (1.0 if it predates
+	 * vkEnumerateInstanceVersion), never more: a 1.0-only driver then still
+	 * works. If the driver refuses, retry with 1.0.
+	 */
+	uint32_t inst_ver = VK_API_VERSION_1_0;
+	PFN_vkEnumerateInstanceVersion enum_ver =
+		(PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(nullptr,
+								      "vkEnumerateInstanceVersion");
+
+	if (enum_ver && enum_ver(&inst_ver) != VK_SUCCESS)
+		inst_ver = VK_API_VERSION_1_0;
+	if (o->max_api && inst_ver > o->max_api)
+		inst_ver = o->max_api;         /* --api: behave as a driver of that version */
 	VkApplicationInfo app = {
 		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 		.pApplicationName = "vkfwtest",
-		.apiVersion = VK_API_VERSION_1_2,
+		.apiVersion = inst_ver,
 	};
 	VkInstanceCreateInfo ici = {
 		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -240,7 +381,14 @@ enum result vk_init(struct vk *v, const struct opts *o)
 	v->verbose = o->verbose;
 	v->dump = o->dump;
 	v->timeout_ns = (uint64_t)OPT(o->timeout_s, 60) * 1000000000ull;
-	VK_CHECK(v, vkCreateInstance(&ici, nullptr, &v->inst));
+	VkResult ir = vkCreateInstance(&ici, nullptr, &v->inst);
+
+	if (ir == VK_ERROR_INCOMPATIBLE_DRIVER && inst_ver != VK_API_VERSION_1_0) {
+		inst_ver = app.apiVersion = VK_API_VERSION_1_0;
+		ir = vkCreateInstance(&ici, nullptr, &v->inst);
+	}
+	VK_CHECK(v, ir);
+	v->inst_api = inst_ver;
 
 	VK_CHECK(v, vkEnumeratePhysicalDevices(v->inst, &n, nullptr));
 	if (!n) {
@@ -274,7 +422,17 @@ enum result vk_init(struct vk *v, const struct opts *o)
 	free(devs);
 	vkGetPhysicalDeviceProperties(v->phys, &v->props);
 	vkGetPhysicalDeviceMemoryProperties(v->phys, &v->mem);
-	if (v->props.apiVersion >= VK_API_VERSION_1_1) {
+	/* what tests may use: the lower of the instance and device versions */
+	v->api = VK_MAKE_API_VERSION(0, VK_API_VERSION_MAJOR(v->props.apiVersion),
+				     VK_API_VERSION_MINOR(v->props.apiVersion), 0);
+	if (v->api > v->inst_api)
+		v->api = VK_MAKE_API_VERSION(0, VK_API_VERSION_MAJOR(v->inst_api),
+					     VK_API_VERSION_MINOR(v->inst_api), 0);
+	LOG(v, 1, "vkfwtest: Vulkan %u.%u (instance %u.%u, device %u.%u)\n",
+	    VK_API_VERSION_MAJOR(v->api), VK_API_VERSION_MINOR(v->api),
+	    VK_API_VERSION_MAJOR(v->inst_api), VK_API_VERSION_MINOR(v->inst_api),
+	    VK_API_VERSION_MAJOR(v->props.apiVersion), VK_API_VERSION_MINOR(v->props.apiVersion));
+	if (v->api >= VK_API_VERSION_1_1) {
 		VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
 						   .pNext = &v->subgroup };
 
@@ -1057,7 +1215,7 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 			.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
 			.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
 			.alphaBlendOp = VK_BLEND_OP_ADD,
-			.colorWriteMask = 0xF,
+			.colorWriteMask = d->write_masks ? d->write_masks[i < OPT(d->colors, 1) ? i : 0] : 0xF,
 		};
 	VkPipelineColorBlendStateCreateInfo cb = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -1082,6 +1240,7 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 		.pDepthStencilState = &ds,
 		.pColorBlendState = &cb,
 		.pDynamicState = &dy,
+		.pNext = d->pnext,
 		.layout = d->layout,
 		.renderPass = d->rp,
 		.subpass = d->subpass,

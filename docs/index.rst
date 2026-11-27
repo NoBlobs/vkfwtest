@@ -28,6 +28,7 @@ every test, which is how the expected values themselves are checked.
    building
    usage
    tests
+   versions
    architecture
    writing-tests
    troubleshooting

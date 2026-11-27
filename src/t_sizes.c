@@ -104,6 +104,8 @@ enum result test_sizes(struct vk *v, const struct opts *o, struct report *r)
 	static const uint32_t sizes[][2] = {
 		{ 1, 1 }, { 7, 5 }, { 33, 17 }, { 97, 61 }, { 256, 1 }, { 1, 256 },
 		{ 1000, 3 }, { 1920, 1080 }, { 4096, 4096 },
+		/* the larger minimum limits of newer Vulkan versions; skipped above the limit */
+		{ 8192, 32 }, { 32, 8192 }, { 16384, 16 },     /* 8192x8192: -s 8192x8192 */
 	};
 	uint32_t seed = OPT(o->seed, 1), done = 0, skipped = 0;
 	uint32_t maxw = v->props.limits.maxFramebufferWidth;
@@ -145,7 +147,7 @@ enum result test_sizes(struct vk *v, const struct opts *o, struct report *r)
 	}
 	CHECK(one_size(v, r, pipe, layout, rp_clear, rp_load, 300, 200, seed, true));
 	snprintf(r->detail, sizeof(r->detail),
-		 "%u sizes from 1x1 to 4096x4096%s, plus a partial render area in 300x200", done,
+		 "%u sizes from 1x1 to 16384x16%s, plus a partial render area in 300x200", done,
 		 skipped ? " (some above the device limit skipped)" : "");
 	return R_PASS;
 }

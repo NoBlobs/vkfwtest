@@ -20,7 +20,11 @@
 enum result test_compute_dims(struct vk *v, const struct opts *o, struct report *r)
 {
 	(void)o;
-	/* 1. 3D dispatch with vkCmdDispatchBase */
+	/* 1. 3D dispatch with vkCmdDispatchBase (core 1.1; skipped on 1.0) */
+	bool base = v->api >= VK_API_VERSION_1_1;
+
+	if (!base)
+		goto reduce;
 	constexpr uint32_t GX = 12;
 	constexpr uint32_t GY = 8;
 	constexpr uint32_t GZ = 6;
@@ -101,6 +105,7 @@ enum result test_compute_dims(struct vk *v, const struct opts *o, struct report 
 				}
 			}
 
+reduce:
 	/* 2. largest 1D workgroup with shared-memory reduction */
 	uint32_t max_n = v->props.limits.maxComputeWorkGroupSize[0];
 
@@ -182,6 +187,7 @@ enum result test_compute_dims(struct vk *v, const struct opts *o, struct report 
 		}
 	}
 	snprintf(r->detail, sizeof(r->detail),
-		 "3D dispatchBase (1,1,1)+(2,3,2), max workgroup %u reduction x %u", max_n, WGS);
+		 "%s, max workgroup %u reduction x %u",
+		 base ? "3D dispatchBase (1,1,1)+(2,3,2)" : "dispatchBase skipped (Vulkan 1.0)", max_n, WGS);
 	return R_PASS;
 }

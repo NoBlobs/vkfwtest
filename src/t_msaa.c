@@ -247,7 +247,7 @@ enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 		};
 		vkGetPhysicalDeviceProperties2(v->phys, &p2);
 		PFN_vkCreateRenderPass2 crp2 =
-			v->props.apiVersion >= VK_API_VERSION_1_2 ? vkCreateRenderPass2 :
+			v->api >= VK_API_VERSION_1_2 ? vkCreateRenderPass2 :
 			(PFN_vkCreateRenderPass2)vkGetDeviceProcAddr(v->dev, "vkCreateRenderPass2KHR");
 		if (crp2 && (dsrp.supportedDepthResolveModes & VK_RESOLVE_MODE_SAMPLE_ZERO_BIT)) {
 			struct img dms, dres;

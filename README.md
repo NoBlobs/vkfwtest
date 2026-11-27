@@ -53,6 +53,7 @@ vkfwtest [options] <test|group:NAME>... | all | list
   -p, --priority P       low|medium|high (VK_KHR/EXT_global_priority)
   -d, --device N         physical device index (default: first PowerVR, else 0)
   -K, --keep-device      run all the tests on one device (in order)
+  -A, --api X.Y          use at most Vulkan X.Y (instance and device)
   -I, --idle-ms MS       idle-resume: idle time (default: autosuspend delay + 500)
   -D, --dump DIR         write got/expected/diff PPM images of mismatches to DIR
   -P, --require-preempt  prio-*: fail unless the probes overtake the long job
@@ -62,6 +63,13 @@ vkfwtest [options] <test|group:NAME>... | all | list
 ```
 
 Each test creates its own `VkDevice`, so the kernel creates fresh firmware contexts for it.
+
+**Vulkan versions.** vkfwtest requires only Vulkan 1.0. It asks for the instance version
+the loader offers (falling back to 1.0 if the driver refuses) and uses the lower of the
+instance and device versions. Features of newer versions are used only when present, by core
+version or by extension; otherwise the test, or the part of it, reports `SKIP`. `--api X.Y`
+caps the version, to see what a driver of that version would run. See
+`docs/versions.rst` for the tests by minimum version.
 
 **Shader caches.** On NVIDIA, run with `__GL_SHADER_DISK_CACHE=0`: the on-disk cache can
 return a pipeline built without `VK_PIPELINE_CREATE_DISPATCH_BASE_BIT` for the same SPIR-V,
@@ -99,6 +107,10 @@ On a mismatch, the first 8 wrong values are printed on stderr as `(x,y) got … 
 |---|---|---|
 | `multiframe` (`pre-3d`) | geometry + fragment over several frames on one device and framebuffer, so the driver alternates the two HWRTData of the render target | every pixel of every frame: a per-frame colour, or with `--iters` a per-pixel integer LCG |
 | `pre-ta` | geometry-heavy frames: layers of tiny tiled triangles, 100 K by default | every pixel equals the last layer's colour for its cell |
+| `load-store-none` | attachments with `STORE_OP_NONE` (1.3) and `LOAD_OP_NONE` (1.4), or `VK_KHR/EXT_load_store_op_none`: bound but never written, their uploaded pattern must survive | every pixel of both attachments |
+| `local-read` | dynamic rendering local read (1.4 or `VK_KHR_dynamic_rendering_local_read`): one rendering, a draw, a by-region barrier, then the attachment read as an input attachment | both attachments, every pixel |
+| `vertex-ext` | 8-bit indices and instance-rate divisors including 0 (1.4, or `index_type_uint8` / `vertex_attribute_divisor` extensions) | every pixel |
+| `sync2` | `vkQueueSubmit2` with semaphores and `vkCmdPipelineBarrier2` (1.3 or `VK_KHR_synchronization2`) | every word, in the order both barriers impose |
 | `pre-cdm` | compute dispatches (local size 64) | every word equals `lcg(id ^ seed, iters)` |
 | `xfer` | 3D-pipe transfers on a 137×91 (NPOT) and a 256×256 image: upload, copy with offsets onto a cleared image, mirrored 1:1 blit, 4× MSAA clear + resolve | every byte |
 | `bigpb` | parameter-buffer out-of-memory: millions of triangles (4 M by default) into 1024×1024 + `D32_SFLOAT` (stored), so free-list grows and partial renders happen | every pixel equals the **first** layer's colour (later layers are farther away), so a partial render that loses depth or colour fails |

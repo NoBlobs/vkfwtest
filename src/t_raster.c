@@ -824,10 +824,12 @@ enum result test_raster(struct vk *v, const struct opts *o, struct report *r)
 
 	/* 9. Dynamic rendering (VK_KHR_dynamic_rendering) with LOAD/STORE DONT_CARE */
 	if (v->has_dyn_rendering) {
-		PFN_vkCmdBeginRenderingKHR begin_ren =
-			(PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(v->dev, "vkCmdBeginRenderingKHR");
-		PFN_vkCmdEndRenderingKHR end_ren =
-			(PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(v->dev, "vkCmdEndRenderingKHR");
+		/* core names from 1.3, the extension's below */
+		bool core13 = v->api >= VK_API_VERSION_1_3;
+		PFN_vkCmdBeginRenderingKHR begin_ren = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(
+			v->dev, core13 ? "vkCmdBeginRendering" : "vkCmdBeginRenderingKHR");
+		PFN_vkCmdEndRenderingKHR end_ren = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(
+			v->dev, core13 ? "vkCmdEndRendering" : "vkCmdEndRenderingKHR");
 		if (begin_ren && end_ren) {
 			VkFormat cfmt = FMT;
 			VkPipelineRenderingCreateInfo prci = {

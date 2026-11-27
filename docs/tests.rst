@@ -6,14 +6,14 @@ Tests
 =====
 
 Every test computes its expected values on the CPU and compares the whole
-output. All geometry comes from ``gl_VertexIndex`` (except ``vertex``), and
-cell edges fall on pixel edges, so expected colours are exact. Filtering,
-sRGB and multisample averages allow ±1. The shaders' integer LCG
-(``--iters``) is checked with its closed form, so jobs of millions of
-iterations are still checked exactly.
+output. Most geometry comes from ``gl_VertexIndex``, and cell edges fall on
+pixel edges, so expected colours are exact. Filtering, sRGB and multisample
+averages allow ±1. The shaders' integer LCG (``--iters``) is checked with its
+closed form, so jobs of millions of iterations are still checked exactly.
 
-A test the device cannot run (a missing feature, format or extension)
-reports ``SKIP``.
+A test, or the part of a test, that the device cannot run (a missing feature,
+format, extension or Vulkan version) reports ``SKIP``. :doc:`versions` lists
+the tests by the Vulkan version they need.
 
 Render
 ======
@@ -73,6 +73,15 @@ Render
    * - ``raster``
      - viewport offset + negative height, triangle strip + primitive restart, fan, line strip, depth bias/clamp/bounds, wide lines, large points, 4× sample mask, sample shading + alpha-to-coverage, no-attachment pass, dynamic rendering
      - every pixel and atomic fragment count
+   * - ``load-store-none``
+     - attachments with ``STORE_OP_NONE`` (1.3) and ``LOAD_OP_NONE`` (1.4), or ``VK_KHR/EXT_load_store_op_none``: bound but never written, their uploaded pattern must survive
+     - every pixel of both attachments
+   * - ``local-read``
+     - dynamic rendering local read (1.4 or ``VK_KHR_dynamic_rendering_local_read``): one rendering, a draw, a by-region barrier, then the attachment read as an input attachment
+     - both attachments, every pixel
+   * - ``vertex-ext``
+     - 8-bit indices and instance-rate divisors including 0 (1.4, or ``index_type_uint8`` / ``vertex_attribute_divisor`` extensions)
+     - every pixel
 
 Compute
 =======
@@ -153,6 +162,9 @@ Synchronisation
    * - ``sync``
      - binary semaphores (multi-queue when available), timeline semaphores, host/GPU events, 500 small fence-synced submits, external ``sync_file`` fence export/import
      - every word
+   * - ``sync2``
+     - ``vkQueueSubmit2`` with semaphores and ``vkCmdPipelineBarrier2`` (1.3 or ``VK_KHR_synchronization2``)
+     - every word, in the order both barriers impose
 
 Memory
 ======
@@ -252,13 +264,7 @@ Priority and preemption (not in all)
    * - Test
      - Firmware paths
      - Checked
-   * - ``prio-3d``
-     - **not in ``all``**. A long job calibrated to about 1.5 s on a LOW-priority device, while 10 short probes run on a HIGH-priority device
-     - every output. It reports whether the probes were delayed; with ``--require-preempt``, a delay is a failure
-   * - ``prio-ta``
-     - **not in ``all``**. A long job calibrated to about 1.5 s on a LOW-priority device, while 10 short probes run on a HIGH-priority device
-     - every output. It reports whether the probes were delayed; with ``--require-preempt``, a delay is a failure
-   * - ``prio-cdm``
+   * - ``prio-3d``, ``prio-ta``, ``prio-cdm``
      - **not in ``all``**. A long job calibrated to about 1.5 s on a LOW-priority device, while 10 short probes run on a HIGH-priority device
      - every output. It reports whether the probes were delayed; with ``--require-preempt``, a delay is a failure
 

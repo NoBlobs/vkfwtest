@@ -48,6 +48,7 @@ struct opts {
 	uint32_t idle_ms;       /* idle-resume: idle time (0: autosuspend delay + margin) */
 	uint32_t bench;         /* run each test N times and print timings */
 	bool robust;            /* enable robustBufferAccess (internal) */
+	uint32_t max_api;       /* --api: highest version to ask for and use (0: no cap) */
 };
 
 #define OPT(v, def) ((v) ? (v) : (def))
@@ -91,6 +92,11 @@ struct vk {
 	bool has_multiview, has_timeline;
 	bool has_push_desc, has_dyn_rendering, has_ds_resolve, has_ext_fence_fd;
 	bool has_sparse_queue;
+	uint32_t inst_api;      /* instance version we asked for (never more than offered) */
+	uint32_t api;           /* min(instance, device) version: what tests may use */
+	/* 1.3 / 1.4 features, by core version or extension, only when present */
+	bool has_sync2, has_local_read, has_index8, has_divisor, has_divisor_zero;
+	bool has_load_none, has_store_none;
 	VkPhysicalDeviceSubgroupProperties subgroup;
 	const char *dump;               /* --dump directory, or null */
 	const char *test;               /* name of the running test (dump file names) */
@@ -221,6 +227,8 @@ struct gfx_desc {
 	const VkCompareOp *depth_op;            /* null: LESS */
 	bool depth_no_write;
 	const VkStencilOpState *stencil;        /* null: no stencil test */
+	const VkColorComponentFlags *write_masks;       /* per attachment; null: all */
+	const void *pnext;                      /* VkGraphicsPipelineCreateInfo.pNext */
 };
 [[nodiscard]] enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d);
 /* A compute pipeline whose set 0 binding 0 is the storage buffer `ssbo`. */
@@ -312,6 +320,10 @@ enum result test_stress(struct vk *v, const struct opts *o, struct report *r);
 enum result test_soak(struct vk *v, const struct opts *o, struct report *r);
 enum result test_churn(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_fault(struct vk *v, const struct opts *o, struct report *r);
+enum result test_load_store_none(struct vk *v, const struct opts *o, struct report *r);
+enum result test_sync2(struct vk *v, const struct opts *o, struct report *r);
+enum result test_vertex_ext(struct vk *v, const struct opts *o, struct report *r);
+enum result test_local_read(struct vk *v, const struct opts *o, struct report *r);
 enum result test_secondary(struct vk *v, const struct opts *o, struct report *r);
 enum result test_multiview(struct vk *v, const struct opts *o, struct report *r);
 enum result test_raster(struct vk *v, const struct opts *o, struct report *r);

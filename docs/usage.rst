@@ -55,6 +55,9 @@ Options
    * - ``-K, --keep-device``
      - run all the tests on one device, in order (to reproduce bugs that need
        earlier work on the same context)
+   * - ``-A, --api X.Y``
+     - use at most Vulkan X.Y for the instance and the device, as a driver of
+       that version would (:doc:`versions`)
    * - ``-I, --idle-ms MS``
      - ``idle-resume``: idle time (default: the autosuspend delay + 500 ms)
    * - ``-D, --dump DIR``

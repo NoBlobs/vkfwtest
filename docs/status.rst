@@ -7,9 +7,10 @@ Status and limits
 
 State on 2026-11-27:
 
-* 42 tests: 35 in ``all``, 4 ``hwr-*``, 3 ``prio-*``;
-* on a desktop GPU (NVIDIA GTX 1060), all 35 tests of ``all`` pass, with
-  ``__GL_SHADER_DISK_CACHE=0`` (:doc:`troubleshooting`);
+* 46 tests: 39 in ``all``, 4 ``hwr-*``, 3 ``prio-*``;
+* on a desktop GPU (NVIDIA GTX 1060), all 39 tests of ``all`` pass at every
+  ``--api`` from 1.1 to 1.4, and 34 (5 skipped) at 1.0 (:doc:`versions`);
+* only Vulkan 1.0 is required: newer features are used when present;
 * on the BXE-2-32 board, the failures point at firmware bugs, not at the
   harness. They are recorded in the firmware repository (experiment E044).
 

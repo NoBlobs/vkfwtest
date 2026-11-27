@@ -109,6 +109,15 @@ Items are ordered by how much they help firmware work. Each new test keeps the r
       the firmware.
 - [x] A one-line summary per group (`== groups: ...` and JSON `"groups"`).
 
+## 12. Vulkan 1.3 / 1.4 (optional, never required)
+
+- [x] Negotiated instance version (no requirement), `--api X.Y` cap; SPIR-V 1.0 shaders
+      except the subgroup one.
+- [x] `sync2`, `local-read`, `load-store-none`, `vertex-ext`; `sizes` thin targets up to
+      16384 (8192×8192 with `--size`).
+- [ ] Inline uniform blocks, `maintenance4/5/6`, `pipeline_robustness`, line rasterization
+      modes — mostly driver paths, low value for firmware.
+
 ## Known limits of the current tests
 
 - `rta`: the `gl_Layer` draw needs `VK_EXT_shader_viewport_index_layer`, which the

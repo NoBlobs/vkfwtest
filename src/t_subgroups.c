@@ -24,7 +24,7 @@ enum result test_subgroups(struct vk *v, const struct opts *o, struct report *r)
 				     VK_SUBGROUP_FEATURE_BALLOT_BIT |
 				     VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
 
-	if (v->props.apiVersion < VK_API_VERSION_1_1 ||
+	if (v->api < VK_API_VERSION_1_1 ||
 	    !(v->subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
 	    (v->subgroup.supportedOperations & req) != req) {
 		snprintf(r->detail, sizeof(r->detail),

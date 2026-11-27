@@ -67,6 +67,12 @@ static const struct test tests[] = {
 	  "VK_KHR_multiview: one draw into 2 layers with gl_ViewIndex" },
 	{ "raster", nullptr, "render", test_raster, true,
 	  "viewport offset / negative height, strips, fans, primitive restart, sample mask, no-attachment pass" },
+	{ "load-store-none", nullptr, "render", test_load_store_none, true,
+	  "attachments with STORE_OP_NONE / LOAD_OP_NONE stay untouched (1.3 / 1.4, optional)" },
+	{ "local-read", nullptr, "render", test_local_read, true,
+	  "dynamic rendering local read: draw, by-region barrier, read the attachment (1.4, optional)" },
+	{ "vertex-ext", nullptr, "render", test_vertex_ext, true,
+	  "8-bit indices and instance-rate divisors, incl. zero (1.4, optional)" },
 	/* compute */
 	{ "pre-cdm", nullptr, "compute", test_precdm, true,
 	  "compute dispatches writing an LCG pattern (--groups, --iters)" },
@@ -95,6 +101,8 @@ static const struct test tests[] = {
 	/* sync, memory, robustness, power */
 	{ "sync", nullptr, "sync", test_sync, true,
 	  "semaphores between submissions and queues, timeline semaphores, events, 500 small submits" },
+	{ "sync2", nullptr, "sync", test_sync2, true,
+	  "vkQueueSubmit2 with semaphores and vkCmdPipelineBarrier2 (1.3, optional)" },
 	{ "memory", nullptr, "memory", test_memory, true,
 	  "a large allocation, many small ones, map/unmap in a loop" },
 	{ "sparse", nullptr, "memory", test_sparse, true,
@@ -149,6 +157,7 @@ static void usage(FILE *f)
 		"  -p, --priority P       low|medium|high (VK_KHR/EXT_global_priority)\n"
 		"  -d, --device N         physical device index (default: first PowerVR, else 0)\n"
 		"  -K, --keep-device      run all the tests on one device (in order)\n"
+		"  -A, --api X.Y          use at most Vulkan X.Y (instance and device)\n"
 		"  -I, --idle-ms MS       idle-resume: idle time (default: autosuspend delay + 500)\n"
 		"  -D, --dump DIR         write got/expected/diff PPM images of mismatches to DIR\n"
 		"  -P, --require-preempt  prio-*: fail unless the probes overtake the long job\n"
@@ -362,6 +371,7 @@ int main(int argc, char **argv)
 		{ "priority", required_argument, nullptr, 'p' },
 		{ "device", required_argument, nullptr, 'd' },
 		{ "keep-device", no_argument, nullptr, 'K' },
+		{ "api", required_argument, nullptr, 'A' },
 		{ "idle-ms", required_argument, nullptr, 'I' },
 		{ "dump", required_argument, nullptr, 'D' },
 		{ "keep-going", no_argument, nullptr, 'k' },
@@ -376,7 +386,7 @@ int main(int argc, char **argv)
 	struct opts o = { .device = -1 };
 	int c;
 
-	while ((c = getopt_long(argc, argv, "f:s:t:i:g:S:T:L:r:b:p:d:KI:D:PkjvqVh", lo, nullptr)) !=
+	while ((c = getopt_long(argc, argv, "f:s:t:i:g:S:T:L:r:b:p:d:KA:I:D:PkjvqVh", lo, nullptr)) !=
 	       -1) {
 		bool ok = true;
 
@@ -409,6 +419,14 @@ int main(int argc, char **argv)
 			break;
 		}
 		case 'K': o.keep_device = true; break;
+		case 'A': {
+			unsigned maj, min;
+
+			ok = sscanf(optarg, "%u.%u", &maj, &min) == 2 && maj == 1 && min <= 9;
+			if (ok)
+				o.max_api = VK_MAKE_API_VERSION(0, maj, min, 0);
+			break;
+		}
 		case 'I': ok = parse_u32(optarg, &o.idle_ms); break;
 		case 'D': o.dump = optarg; break;
 		case 'P': o.require_preempt = true; break;

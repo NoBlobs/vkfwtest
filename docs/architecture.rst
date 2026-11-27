@@ -36,7 +36,14 @@ Source layout
 The Vulkan context
 ==================
 
-``vk_init()`` creates one instance (API 1.2 requested) and one device:
+``vk_init()`` creates one instance and one device. Only Vulkan 1.0 is
+required:
+
+* the instance asks for the version the loader offers (``--api`` can cap it),
+  and retries with 1.0 if the driver refuses; ``v->api`` is the lower of the
+  instance and device versions, and every 1.1+ call or feature is gated on it;
+* shaders are SPIR-V 1.0, except the subgroup shader (SPIR-V 1.3, run only on
+  1.1 devices);
 
 * the physical device is ``--device N``, else the first whose name contains
   "PowerVR", else device 0;
@@ -47,7 +54,12 @@ The Vulkan context
   depth clamp and bias clamp, ETC2, cube arrays, sample shading, anisotropy,
   multiview, timeline semaphores; ``robustBufferAccess`` only on request;
 * ``VK_EXT_shader_viewport_index_layer`` and other extensions when the
-  device has them (flags such as ``has_output_layer``, ``has_timeline``).
+  device has them (flags such as ``has_output_layer``, ``has_timeline``);
+* the 1.3/1.4 items (``synchronization2``, dynamic rendering and its local
+  read, load/store ``NONE``, 8-bit indices, attribute divisors) from the
+  device's core version when it has it, else from the extension when offered
+  (``has_sync2``, ``has_local_read``, ``has_load_none``, ``has_index8``,
+  ``has_divisor``, …).
 
 Every object a helper creates is recorded in ``v->objs``;
 ``vk_fini()`` waits for the device (unless it is lost) and destroys them in
