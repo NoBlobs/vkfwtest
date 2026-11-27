@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# vkfwtest baseline: Linux 7.4.0-rc1-img + Mesa pvr f7c93a1352 + manufacturer open firmware v1.1 (build 6976702 OS), BPI-F3
+# Source: docsClean vkfwtest-results.md (commit 50055ae), vkfwtest db6f34d, `vkfwtest -k all`.
+# Format: <test> <PASS|FAIL|SKIP|TIMEOUT|LOST|ERROR>; use with `vkfwtest --baseline FILE`.
+# Tests added to vkfwtest after db6f34d are not listed (reported as "new").
+multiframe       FAIL
+pre-ta           FAIL
+bigpb            FAIL
+input-attach     FAIL
+rta              PASS
+zs-load          FAIL
+msaa             PASS
+mrt              FAIL
+sizes            FAIL
+vertex           FAIL
+indirect         PASS
+queries          PASS
+formats          FAIL
+secondary        FAIL
+multiview        FAIL
+raster           FAIL
+load-store-none  SKIP
+local-read       SKIP
+vertex-ext       FAIL
+pre-cdm          PASS
+resources        PASS
+compute-dims     PASS
+subgroups        PASS
+xfer             PASS
+buffers          PASS
+ds-copy          PASS
+blit-mips        PASS
+image-copy       PASS
+texture          FAIL
+texture2         PASS
+sync             PASS
+sync2            PASS
+memory           PASS
+sparse           SKIP
+robust           PASS
+idle-resume      FAIL
+stress           FAIL
+soak             FAIL
+churn            FAIL

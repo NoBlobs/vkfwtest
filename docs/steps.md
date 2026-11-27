@@ -4,8 +4,9 @@
 # vkfwtest — what is left to implement
 
 State on 2026-11-27:
-- 42 tests (35 in `all`, 4 `hwr-*`, 3 `prio-*`);
-- all 35 tests of `all` pass on a desktop GPU (NVIDIA GTX 1060);
+- 57 tests (50 in `all`, 4 `hwr-*`, 3 `prio-*`);
+- 49 of the 50 tests of `all` pass on a desktop GPU (NVIDIA GTX 1060), `suspend-after` is
+  skipped there (no runtime PM);
 - on the BXE-2-32 board, the failures point at firmware bugs, not at the harness.
 
 Items are ordered by how much they help firmware work. Each new test keeps the rules in
@@ -109,12 +110,25 @@ Items are ordered by how much they help firmware work. Each new test keeps the r
       the firmware.
 - [x] A one-line summary per group (`== groups: ...` and JSON `"groups"`).
 
+## 12. Firmware investigation (2026-11-27)
+
+- [x] `second-*`: the second render on a device, one state change at a time (group `second`);
+      `second-split` and `second-barrier` found the cause (Mesa ignores external subpass
+      dependencies). The read-back helpers now issue an explicit barrier.
+- [x] `--baseline FILE` and `baselines/`: compare a run with the reference runs of `docsClean`.
+- [x] `bigpb-layers`: parameter-buffer partial renders in a render-target array.
+- [x] `suspend-after`: runtime suspend after compute and sync work.
+- [x] `ctx-switch`: two firmware contexts with interleaved renders and dispatches.
+- [x] `rta` step 6: a 6-view multiview draw puts geometry in every layer; `msaa` measures the
+      sample positions.
+
 ## Known limits of the current tests
 
 - `rta`: the `gl_Layer` draw needs `VK_EXT_shader_viewport_index_layer`, which the
-  current PowerVR driver lacks. There, only the layered clears run.
+  current PowerVR driver lacks. The 6-view multiview step gives every layer geometry instead.
 - `indirect`: the multi-draw part needs `multiDrawIndirect`.
 - `queries`: exact occlusion counts need `occlusionQueryPrecise`; without it only
   zero / non-zero is checked.
-- `msaa`: the diagonal coverage is checked only with standard sample positions.
+- `msaa`: without `sampleRateShading` and `fragmentStoresAndAtomics` the positions are not
+  measured, and with custom positions the diagonal is then skipped.
 - `hwr-*`: never run on a GPU that drives a display.

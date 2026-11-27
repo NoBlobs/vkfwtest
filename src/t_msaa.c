@@ -3,9 +3,13 @@
 /*
  * msaa: a 4x render resolved at the end of the render pass (resolve
  * attachment). A triangle covers the pixels above the main diagonal (x > y):
- * those must be C1, those below C0. On the diagonal, the standard 4x sample
- * positions put exactly 2 of 4 samples inside, so the resolve gives
- * (C1 + C0) / 2 (+-1); with non-standard positions the diagonal is skipped.
+ * those must be C1, those below C0. A diagonal pixel gets C1 from the samples
+ * with sx > sy and C0 from the others, so the resolve gives their mix (+-1).
+ * The 4x sample positions are measured first (gl_SamplePosition written per
+ * gl_SampleID into a buffer, 1x1 target) when the device has sample-rate
+ * shading and fragment stores; with standardSampleLocations they must match
+ * the standard table. Without the measurement, the standard table is used,
+ * and with custom positions the diagonal is skipped.
  */
 #include <inttypes.h>
 #include <stdio.h>
@@ -15,6 +19,8 @@
 
 #include "poly.vert.h"
 #include "poly.frag.h"
+#include "fullscreen.vert.h"
+#include "samplepos.frag.h"
 
 constexpr VkFormat FMT = VK_FORMAT_R8G8B8A8_UNORM;
 
@@ -121,13 +127,97 @@ static enum result run_msaa_half(struct vk *v, struct report *r, uint32_t w, uin
 	return R_PASS;
 }
 
+/* the standard 4x sample positions (Vulkan spec, "Standard sample locations") */
+static const float std4[4][2] = {
+	{ 0.375f, 0.125f }, { 0.875f, 0.375f }, { 0.125f, 0.625f }, { 0.625f, 0.875f },
+};
+
+/* Measure the 4x sample positions; R_SKIP when the device cannot. */
+static enum result measure_positions(struct vk *v, float pos[4][2])
+{
+	struct img ms;
+	struct buf pb;
+	VkRenderPass rp;
+	VkFramebuffer fb;
+	VkShaderModule vs, fs;
+	VkDescriptorSetLayout dsl;
+	VkDescriptorSet set;
+	VkPipelineLayout layout;
+	VkPipeline pipe;
+	VkCommandBuffer cb;
+	struct rp_desc rd = { .color = FMT, .samples = VK_SAMPLE_COUNT_4_BIT };
+
+	if (!v->feat.sampleRateShading || !v->feat.fragmentStoresAndAtomics)
+		return R_SKIP;
+	CHECK(img_create(v, &ms, 1, 1, FMT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			 VK_SAMPLE_COUNT_4_BIT));
+	CHECK(buf_create(v, &pb, 4 * 2 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true));
+	memset(pb.map, 0xFF, pb.size);          /* NaN until written */
+	CHECK(rp_build(v, &rp, &rd));
+	CHECK(fb_create_views(v, &fb, rp, &ms.view, 1, 1, 1, 1));
+	VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+					   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+
+	CHECK(desc_create(v, &b, 1, &dsl, &set));
+	VkDescriptorBufferInfo bi = { pb.b, 0, VK_WHOLE_SIZE };
+	VkWriteDescriptorSet wr = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+		.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+		.pBufferInfo = &bi,
+	};
+	vkUpdateDescriptorSets(v->dev, 1, &wr, 0, nullptr);
+	CHECK(shader_create(v, &vs, spv_fullscreen_vert, sizeof(spv_fullscreen_vert)));
+	CHECK(shader_create(v, &fs, spv_samplepos_frag, sizeof(spv_samplepos_frag)));
+	CHECK(layout_create(v, &layout, 0, 0, &dsl));
+	struct gfx_desc d = { .rp = rp, .layout = layout, .vs = vs, .fs = fs,
+			      .samples = VK_SAMPLE_COUNT_4_BIT };
+
+	CHECK(gfx_pipeline(v, &pipe, &d));
+	VkClearValue clear = { .color.float32 = { 0, 0, 0, 0 } };
+	VkRenderPassBeginInfo rbi = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderPass = rp,
+		.framebuffer = fb,
+		.renderArea = { { 0, 0 }, { 1, 1 } },
+		.clearValueCount = 1,
+		.pClearValues = &clear,
+	};
+	VkViewport vp = { 0, 0, 1, 1, 0, 1 };
+	VkRect2D sc = { { 0, 0 }, { 1, 1 } };
+	VkBufferMemoryBarrier hb = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+		.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.buffer = pb.b,
+		.size = VK_WHOLE_SIZE,
+	};
+
+	CHECK(cmd_begin(v, &cb));
+	vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+	vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+	vkCmdSetViewport(cb, 0, 1, &vp);
+	vkCmdSetScissor(cb, 0, 1, &sc);
+	vkCmdDraw(cb, 3, 1, 0, 0);
+	vkCmdEndRenderPass(cb);
+	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+			     0, nullptr, 1, &hb, 0, nullptr);
+	CHECK(cmd_submit_wait(v, cb));
+	memcpy(pos, pb.map, 4 * 2 * sizeof(float));
+	return R_PASS;
+}
+
 enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 {
 	uint32_t w = OPT(o->width, 64), frames = OPT(o->frames, 2), seed = OPT(o->seed, 1);
 	uint32_t h = w;         /* square: the diagonal runs corner to corner */
 	bool standard = v->props.limits.standardSampleLocations;
 	VkSampleCountFlags sc_mask = v->props.limits.framebufferColorSampleCounts;
-	bool did2 = false, did8 = false;
+	bool did2 = false, did8 = false, measured = false, diag = standard;
+	float pos[4][2];
+	uint32_t k_in = 2;      /* samples of a diagonal pixel inside the triangle */
 	struct img ms, res;
 	struct buf rb;
 	VkRenderPass rp;
@@ -148,6 +238,34 @@ enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 		CHECK(run_msaa_half(v, r, w, h, seed, VK_SAMPLE_COUNT_8_BIT, 8));
 		did8 = true;
 	}
+	/* the sample positions: measured, else the standard table */
+	enum result mp = measure_positions(v, pos);
+
+	if (mp != R_PASS && mp != R_SKIP)
+		return mp;
+	measured = mp == R_PASS;
+	if (!measured)
+		memcpy(pos, std4, sizeof(pos));
+	for (uint32_t i = 0; measured && i < 4; i++) {
+		r->checked++;
+		if (!(pos[i][0] >= 0.0f && pos[i][0] < 1.0f && pos[i][1] >= 0.0f && pos[i][1] < 1.0f) ||
+		    (standard && (pos[i][0] != std4[i][0] || pos[i][1] != std4[i][1]))) {
+			r->mismatches++;
+			snprintf(r->detail, sizeof(r->detail),
+				 "4x sample %u at (%g, %g)%s", i, (double)pos[i][0], (double)pos[i][1],
+				 standard ? ", not the standard position" : ", outside the pixel");
+			return R_MISMATCH;
+		}
+	}
+	if (measured)
+		diag = true;
+	k_in = 0;
+	for (uint32_t i = 0; i < 4; i++) {
+		if (pos[i][0] == pos[i][1])
+			diag = false;           /* on the edge: the fill rule decides */
+		k_in += pos[i][0] > pos[i][1];
+	}
+
 	CHECK(img_create(v, &ms, w, h, FMT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 			 VK_SAMPLE_COUNT_4_BIT));
 	CHECK(img_create(v, &res, w, h, FMT,
@@ -169,7 +287,7 @@ enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 	CHECK(gfx_pipeline(v, &pipe, &d));
 
 	for (uint32_t f = 0; f < frames; f++) {
-		/* even channels: the 2-of-4 average is an integer */
+		/* even channels: the 2-of-4 average of the standard positions is an integer */
 		uint32_t c0 = (lcg(seed + f, 2) & 0x00FEFEFEu) | 0xFF000000u;
 		uint32_t c1 = (lcg(seed + f, 3) & 0x00FEFEFEu) | 0xFF000000u;
 		VkClearValue clear = clear_rgba(c0);
@@ -201,8 +319,11 @@ enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 		r->frames++;
 
 		struct rgba a = rgba_of(c0), b = rgba_of(c1);
-		struct rgba mid = { (uint8_t)((a.r + b.r) / 2), (uint8_t)((a.g + b.g) / 2),
-				    (uint8_t)((a.b + b.b) / 2), 0xFF };
+		struct rgba mid = {
+			(uint8_t)((k_in * b.r + (4 - k_in) * a.r + 2) / 4),
+			(uint8_t)((k_in * b.g + (4 - k_in) * a.g + 2) / 4),
+			(uint8_t)((k_in * b.b + (4 - k_in) * a.b + 2) / 4), 0xFF,
+		};
 
 		for (uint32_t y = 0; y < h; y++)
 			for (uint32_t x = 0; x < w; x++) {
@@ -210,7 +331,7 @@ enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 				struct rgba e = x > y ? b : x < y ? a : mid;
 				bool ok;
 
-				if (x == y && !standard)
+				if (x == y && !diag)
 					continue;
 				checked++;
 				ok = x == y ? close8(p[0], e.r) && close8(p[1], e.g) &&
@@ -373,7 +494,9 @@ enum result test_msaa(struct vk *v, const struct opts *o, struct report *r)
 		 "%ux%u %s4x%s, resolve attachment%s, diagonal edge%s, %u frames", w, h,
 		 did2 ? "2x/" : "", did8 ? "/8x" : "",
 		 did_ds_res ? " + depth resolve" : "",
-		 standard ? " (standard sample positions)" : " (not checked: custom positions)",
+		 !diag ? " (not checked: positions unknown or on the edge)" :
+		 measured ? (standard ? " (measured = standard positions)" : " (measured positions)") :
+			    " (standard sample positions)",
 		 frames);
 	return R_PASS;
 }

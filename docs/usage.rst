@@ -63,6 +63,11 @@ Options
    * - ``-D, --dump DIR``
      - write ``<test>-<what>-{got,expected,diff}.ppm`` for every mismatching
        image to DIR
+   * - ``-B, --baseline FILE``
+     - compare every result with FILE (one ``<test> <RESULT>`` per line, ``#``
+       comments); print a ``BASE`` line for each test that is better, worse or
+       not in the file, and a summary. The exit code is then 0 unless a test is
+       worse. ``baselines/`` holds the reference runs of ``docsClean``
    * - ``-P, --require-preempt``
      - ``prio-*``: fail unless the probes overtake the long job
    * - ``-k, --keep-going``

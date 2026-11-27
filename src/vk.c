@@ -810,6 +810,28 @@ void img_barrier(VkCommandBuffer cb, const struct img *im, VkImageLayout from, V
 	vkCmdPipelineBarrier(cb, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
+bool copy_barrier = true;
+
+/*
+ * Order a read-back copy after everything recorded before it. The render
+ * passes already declare a dependency to VK_SUBPASS_EXTERNAL for TRANSFER,
+ * which is enough by the Vulkan spec; Mesa pvr ignores external subpass
+ * dependencies (firmware E047), so without this barrier the copy runs before
+ * the render. The second-* tests turn it off to keep showing that.
+ */
+static void before_copy(VkCommandBuffer cb)
+{
+	VkMemoryBarrier mb = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+		.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+	};
+
+	if (copy_barrier)
+		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+				     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
 void cmd_copy_to_buffer(VkCommandBuffer cb, const struct img *im, const struct buf *b)
 {
 	VkBufferImageCopy c = {
@@ -826,6 +848,7 @@ void cmd_copy_to_buffer(VkCommandBuffer cb, const struct img *im, const struct b
 		.size = VK_WHOLE_SIZE,
 	};
 
+	before_copy(cb);
 	vkCmdCopyImageToBuffer(cb, im->i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b->b, 1, &c);
 	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
 			     nullptr, 1, &hb, 0, nullptr);
@@ -849,6 +872,7 @@ void cmd_copy_layer_to_buffer(VkCommandBuffer cb, const struct img *im, uint32_t
 		.size = VK_WHOLE_SIZE,
 	};
 
+	before_copy(cb);
 	vkCmdCopyImageToBuffer(cb, im->i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b->b, 1, &c);
 	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
 			     nullptr, 1, &hb, 0, nullptr);

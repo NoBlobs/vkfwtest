@@ -34,11 +34,14 @@ Render
    * - ``bigpb``
      - parameter-buffer out-of-memory: millions of triangles (4 M by default) into 1024×1024 + ``D32_SFLOAT`` (stored), so free-list grows and partial renders happen
      - every pixel equals the **first** layer's colour (later layers are farther away), so a partial render that loses depth or colour fails
+   * - ``bigpb-layers``
+     - ``bigpb`` in a 4-layer colour + ``D32`` array: the grid on layer 0, a clear of its own colour on layers 1-3; with render-target arrays the partial renders must keep every layer
+     - layer 0 as ``bigpb``; layers 1-3 every pixel
    * - ``input-attach``
      - one render pass with two subpasses (two HWRTData). Subpass 0: clear and a depth-tested rectangle. Subpass 1: reads colour + ``D32`` depth as input attachments
      - both colour attachments, every pixel
    * - ``rta``
-     - a 6-layer colour + ``D32`` render target (render-target arrays; on PowerVR with firmware 1.1, one render for all layers): the render pass clear, a draw without ``gl_Layer`` (layer 0 only), per-layer colour and depth ``vkCmdClearAttachments``, one clear rect over layers 2-4, and, with ``VK_EXT_shader_viewport_index_layer``, one ``gl_Layer`` draw per layer; then a ``LOAD`` pass that clears only layers 1 and 5 (the firmware renders only the touched layers), per-layer stencil (D24S8/D32S8), and a 3D image viewed as a 6-layer 2D array (Vulkan 1.1, PBE z slice)
+     - a 6-layer colour + ``D32`` render target (render-target arrays; on PowerVR with firmware 1.1, one render for all layers): the render pass clear, a draw without ``gl_Layer`` (layer 0 only), per-layer colour and depth ``vkCmdClearAttachments``, one clear rect over layers 2-4, and, with ``VK_EXT_shader_viewport_index_layer``, one ``gl_Layer`` draw per layer; then a ``LOAD`` pass that clears only layers 1 and 5 (the firmware renders only the touched layers), per-layer stencil (D24S8/D32S8), a 3D image viewed as a 6-layer 2D array (Vulkan 1.1, PBE z slice), and a 6-view multiview draw that gives every layer geometry of its own colour (on a fresh device; stands in for ``gl_Layer``)
      - every pixel, depth texel and stencil value of every layer; untouched layers keep their contents
    * - ``zs-load``
      - depth + stencil (D24S8 or D32S8, else depth only) stored by one render pass and loaded by the next two
@@ -82,6 +85,51 @@ Render
    * - ``vertex-ext``
      - 8-bit indices and instance-rate divisors including 0 (1.4, or ``index_type_uint8`` / ``vertex_attribute_divisor`` extensions)
      - every pixel
+
+Second render (group ``second``)
+================================
+
+The same two renders on a fresh device (a full-screen triangle of a solid
+colour into 64x64 RGBA8), with one change before the second. The first render
+must pass; which second renders fail shows which change the stack mishandles.
+
+Unlike every other test, these read the image back relying only on the render
+pass's dependency to ``VK_SUBPASS_EXTERNAL`` (``second-barrier`` and
+``second-split`` excepted). Mesa ``pvr`` ignores that dependency, so on it the
+copy races the render and the first six fail; ``second-barrier`` and
+``second-split`` pass. They are the detectors of that driver bug.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 52 30
+
+   * - Test
+     - Change before the second render
+     - Checked
+   * - ``second-same``
+     - none: the same framebuffer, a new command buffer
+     - every pixel of both renders
+   * - ``second-resubmit``
+     - none: the same command buffer submitted again; it clears the image to magenta with a transfer first, so a render that writes nothing shows
+     - the same
+   * - ``second-newfb``
+     - a new image and framebuffer (same render pass and pipeline)
+     - the same
+   * - ``second-newall``
+     - a new render pass, pipeline layout, pipeline, image and framebuffer
+     - the same
+   * - ``second-compute``
+     - a compute dispatch
+     - the same, and every word of the dispatch
+   * - ``second-xfer``
+     - a transfer: buffer fill and image clear
+     - the same, and every word of the fill
+   * - ``second-split``
+     - none, but the second render's read-back copy is a later submission, sent after the render's fence
+     - every pixel of both renders
+   * - ``second-barrier``
+     - none, but the read-back copy is also ordered by an explicit ``vkCmdPipelineBarrier``
+     - every pixel of both renders
 
 Compute
 =======
@@ -207,6 +255,9 @@ Power
    * - Test
      - Firmware paths
      - Checked
+   * - ``suspend-after``
+     - compute and sync work, then the GPU must runtime-suspend (sysfs ``runtime_status``), then a render; skipped without runtime PM (``control`` = ``auto``)
+     - suspended within the autosuspend delay + 3 s; every pixel of the render
    * - ``idle-resume``
      - render, wait past runtime-PM autosuspend delay (``--idle-ms`` or sysfs + 500 ms), render again on the same device
      - every pixel of both renders
@@ -230,6 +281,9 @@ Stress
    * - ``churn``
      - 20 devices created and destroyed, each with 2 frames and a dispatch
      - the same
+   * - ``ctx-switch``
+     - two devices (two firmware contexts); per round A renders and B renders or runs a dispatch, both queued before either is waited for
+     - every pixel and word of every round
 
 Hardware recovery (not in all)
 ==============================

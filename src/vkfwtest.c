@@ -41,6 +41,8 @@ static const struct test tests[] = {
 	  "geometry-heavy frames: layers of tiny tiled triangles (--tris, default 100K)" },
 	{ "bigpb", nullptr, "render", test_bigpb, true,
 	  "parameter-buffer stress: millions of triangles + D32 depth (--tris, default 4M)" },
+	{ "bigpb-layers", nullptr, "render", test_bigpb_layers, true,
+	  "bigpb in a 4-layer array: the grid on layer 0, clears on layers 1-3 (partial renders x RTA)" },
 	{ "input-attach", nullptr, "render", test_input_attach, true,
 	  "two subpasses: subpass 1 reads colour + D32 depth of subpass 0 as input attachments" },
 	{ "rta", nullptr, "render", test_rta, true,
@@ -73,6 +75,23 @@ static const struct test tests[] = {
 	  "dynamic rendering local read: draw, by-region barrier, read the attachment (1.4, optional)" },
 	{ "vertex-ext", nullptr, "render", test_vertex_ext, true,
 	  "8-bit indices and instance-rate divisors, incl. zero (1.4, optional)" },
+	/* the second render on a device: one state change at a time */
+	{ "second-same", nullptr, "second", test_second_same, true,
+	  "two renders on one device, same framebuffer, new command buffer" },
+	{ "second-resubmit", nullptr, "second", test_second_resubmit, true,
+	  "one render command buffer submitted twice" },
+	{ "second-newfb", nullptr, "second", test_second_newfb, true,
+	  "second render into a new image + framebuffer (same render pass, pipeline)" },
+	{ "second-newall", nullptr, "second", test_second_newall, true,
+	  "second render with a new render pass, pipeline and framebuffer" },
+	{ "second-compute", nullptr, "second", test_second_compute, true,
+	  "render, compute dispatch, render (the indirect pattern)" },
+	{ "second-xfer", nullptr, "second", test_second_xfer, true,
+	  "render, transfer (buffer fill + image clear), render" },
+	{ "second-split", nullptr, "second", test_second_split, true,
+	  "second render, then its read-back copy in a later submission (no in-buffer ordering)" },
+	{ "second-barrier", nullptr, "second", test_second_barrier, true,
+	  "two renders; the copy also ordered by an explicit vkCmdPipelineBarrier" },
 	/* compute */
 	{ "pre-cdm", nullptr, "compute", test_precdm, true,
 	  "compute dispatches writing an LCG pattern (--groups, --iters)" },
@@ -111,6 +130,8 @@ static const struct test tests[] = {
 	  "robustBufferAccess: out-of-bounds reads stay in bounds or read zero, no fault" },
 	{ "idle-resume", nullptr, "power", test_idle_resume, true,
 	  "render, wait past the runtime-PM autosuspend, render again on the same device" },
+	{ "suspend-after", nullptr, "power", test_suspend_after, true,
+	  "compute + sync work, then the GPU must runtime-suspend, then render (skip without runtime PM)" },
 	/* stress */
 	{ "stress", nullptr, "stress", test_stress, true,
 	  "4 threads / devices rendering, computing and copying at once" },
@@ -118,6 +139,8 @@ static const struct test tests[] = {
 	  "one long-lived device: >= 100 frames of render, compute, geometry, transfer" },
 	{ "churn", nullptr, "stress", test_churn, true,
 	  "create and destroy 20 devices, each rendering and computing" },
+	{ "ctx-switch", nullptr, "stress", test_ctx_switch, true,
+	  "2 devices (2 firmware contexts): per round A renders, B renders or computes, queued together" },
 	/* disruptive / long */
 	{ "hwr-lockup", nullptr, "hwr", test_hwr_lockup, false,
 	  "[not in all] compute lockup -> device lost, then clean renders on new devices" },
@@ -142,7 +165,7 @@ static void usage(FILE *f)
 	fprintf(f,
 		"usage: vkfwtest [options] <test|group:NAME>... | all | list\n"
 		"  all runs every test except the hwr and prio groups (see 'vkfwtest list')\n"
-		"  groups: render compute transfer texture sync memory robust power stress hwr prio\n"
+		"  groups: render second compute transfer texture sync memory robust power stress hwr prio\n"
 		"\n"
 		"  -f, --frames N         frames / rounds per test (default per test)\n"
 		"  -s, --size WxH         render target size (or N for NxN)\n"
@@ -160,6 +183,8 @@ static void usage(FILE *f)
 		"  -A, --api X.Y          use at most Vulkan X.Y (instance and device)\n"
 		"  -I, --idle-ms MS       idle-resume: idle time (default: autosuspend delay + 500)\n"
 		"  -D, --dump DIR         write got/expected/diff PPM images of mismatches to DIR\n"
+		"  -B, --baseline FILE    compare each result with FILE (\"<test> <RESULT>\" lines);\n"
+		"                         the exit code then fails only when a test is worse\n"
 		"  -P, --require-preempt  prio-*: fail unless the probes overtake the long job\n"
 		"  -k, --keep-going       run the remaining tests after a failure\n"
 		"  -j, --json             one JSON line per test, and a summary line, on stdout\n"
@@ -169,7 +194,8 @@ static void usage(FILE *f)
 		"  -h, --help             this text\n"
 		"\n"
 		"Exit codes: 0 pass, 1 output mismatch, 2 fence or test timeout, 3 device lost,\n"
-		"            4 setup error / bad option, 77 all tests skipped.\n");
+		"            4 setup error / bad option, 77 all tests skipped.\n"
+		"            With --baseline: 0 unless a test is worse than its baseline.\n");
 }
 
 static void list(bool json)
@@ -197,6 +223,72 @@ static const struct test *find(const char *name)
 		    (tests[i].alias && !strcmp(name, tests[i].alias)))
 			return &tests[i];
 	return nullptr;
+}
+
+/* ------------------------------------------------------------ baseline */
+/*
+ * --baseline FILE: the expected result of each test on a reference stack, one
+ * "<test> <PASS|FAIL|SKIP|TIMEOUT|LOST|ERROR>" per line; '#' starts a comment
+ * and anything after the result is ignored. Each result is compared with it.
+ */
+constexpr size_t MAX_BASE = 256;
+static struct { char name[32]; char result[8]; } base[MAX_BASE];
+static size_t nbase;
+
+static bool baseline_load(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char line[256];
+
+	if (!f) {
+		fprintf(stderr, "vkfwtest: cannot open baseline %s\n", path);
+		return false;
+	}
+	while (fgets(line, sizeof(line), f)) {
+		char name[32], res[16];
+		char *hash = strchr(line, '#');
+
+		if (hash)
+			*hash = '\0';
+		if (sscanf(line, "%31s %15s", name, res) != 2)
+			continue;
+		if (nbase == MAX_BASE)
+			break;
+		if (strcmp(res, "PASS") && strcmp(res, "FAIL") && strcmp(res, "SKIP") &&
+		    strcmp(res, "TIMEOUT") && strcmp(res, "LOST") && strcmp(res, "ERROR")) {
+			fprintf(stderr, "vkfwtest: baseline %s: bad result '%s' for %s\n", path, res,
+				name);
+			fclose(f);
+			return false;
+		}
+		strcpy(base[nbase].name, name);
+		strcpy(base[nbase].result, res);
+		nbase++;
+	}
+	fclose(f);
+	return true;
+}
+
+static const char *baseline_of(const char *test)
+{
+	for (size_t i = 0; i < nbase; i++)
+		if (!strcmp(base[i].name, test))
+			return base[i].result;
+	return nullptr;
+}
+
+/* PASS best, then SKIP, FAIL/ERROR, TIMEOUT, LOST */
+static int base_rank(const char *res)
+{
+	if (!strcmp(res, "PASS"))
+		return 0;
+	if (!strcmp(res, "SKIP"))
+		return 1;
+	if (!strcmp(res, "TIMEOUT"))
+		return 3;
+	if (!strcmp(res, "LOST"))
+		return 4;
+	return 2;
 }
 
 /* ------------------------------------------------------------ option parsing */
@@ -374,6 +466,7 @@ int main(int argc, char **argv)
 		{ "api", required_argument, nullptr, 'A' },
 		{ "idle-ms", required_argument, nullptr, 'I' },
 		{ "dump", required_argument, nullptr, 'D' },
+		{ "baseline", required_argument, nullptr, 'B' },
 		{ "keep-going", no_argument, nullptr, 'k' },
 		{ "require-preempt", no_argument, nullptr, 'P' },
 		{ "json", no_argument, nullptr, 'j' },
@@ -384,9 +477,10 @@ int main(int argc, char **argv)
 		{ nullptr, 0, nullptr, 0 },
 	};
 	struct opts o = { .device = -1 };
+	const char *baseline = nullptr;
 	int c;
 
-	while ((c = getopt_long(argc, argv, "f:s:t:i:g:S:T:L:r:b:p:d:KA:I:D:PkjvqVh", lo, nullptr)) !=
+	while ((c = getopt_long(argc, argv, "f:s:t:i:g:S:T:L:r:b:p:d:KA:I:D:B:PkjvqVh", lo, nullptr)) !=
 	       -1) {
 		bool ok = true;
 
@@ -429,6 +523,7 @@ int main(int argc, char **argv)
 		}
 		case 'I': ok = parse_u32(optarg, &o.idle_ms); break;
 		case 'D': o.dump = optarg; break;
+		case 'B': baseline = optarg; break;
 		case 'P': o.require_preempt = true; break;
 		case 'k': o.keep_going = true; break;
 		case 'j': o.json = true; break;
@@ -447,6 +542,8 @@ int main(int argc, char **argv)
 		usage(stderr);
 		return R_SETUP;
 	}
+	if (baseline && !baseline_load(baseline))
+		return R_SETUP;
 
 	/* the tests to run, in command-line order */
 	static const struct test *run[MAX_RUN];
@@ -498,6 +595,8 @@ int main(int argc, char **argv)
 	static struct vk shared;
 	uint32_t reps = o.bench ? o.bench : OPT(o.repeat, 1);
 	bool stop = false;
+	uint32_t bsame = 0, bbetter = 0, bworse = 0, bnone = 0;
+	enum result bworst = R_PASS;
 
 	for (size_t i = 0; i < n && !stop; i++) {
 		double tmin = 1e30, tmax = 0, tsum = 0;
@@ -517,6 +616,35 @@ int main(int argc, char **argv)
 			enum result r = run_one(run[i], &o, it, o.keep_device ? &shared : nullptr, &ms);
 
 			count[r == R_SKIP ? 5 : (int)r]++;
+			if (baseline) {
+				const char *b = baseline_of(run[i]->name), *now = result_name(r);
+				const char *change = "same";
+
+				if (!b) {
+					bnone++;
+					change = "new";
+				} else if (!strcmp(b, now)) {
+					bsame++;
+				} else if (base_rank(now) < base_rank(b)) {
+					bbetter++;
+					change = "better";
+				} else {
+					bworse++;
+					change = "worse";
+					if (severity(r) > severity(bworst))
+						bworst = r == R_SKIP ? R_MISMATCH : r;
+				}
+				if (strcmp(change, "same")) {
+					if (o.json)
+						printf("{\"baseline_diff\":{\"test\":\"%s\",\"baseline\":\"%s\","
+						       "\"result\":\"%s\",\"change\":\"%s\"}}\n",
+						       run[i]->name, b ? b : "", now, change);
+					else
+						printf("BASE    %-12s %s (baseline %s, now %s)\n",
+						       run[i]->name, change, b ? b : "none", now);
+					fflush(stdout);
+				}
+			}
 			if (gi < ngrps) {
 				grps[gi].total++;
 				if (r == R_PASS)
@@ -548,6 +676,8 @@ int main(int argc, char **argv)
 
 	if (worst == R_PASS && count[5] && !count[0])
 		code = R_SKIP;
+	if (baseline)
+		code = bworst;
 	if (o.json) {
 		printf("{\"summary\":{\"pass\":%u,\"fail\":%u,\"timeout\":%u,\"lost\":%u,\"error\":%u,"
 		       "\"skip\":%u,\"code\":%d,\"groups\":{", count[0], count[1], count[2], count[3],
@@ -555,7 +685,11 @@ int main(int argc, char **argv)
 		for (size_t gi = 0; gi < ngrps; gi++)
 			printf("%s\"%s\":{\"pass\":%u,\"total\":%u}", gi ? "," : "",
 			       grps[gi].name, grps[gi].pass, grps[gi].total);
-		printf("}}}\n");
+		printf("}");
+		if (baseline)
+			printf(",\"baseline\":{\"file\":\"%s\",\"same\":%u,\"better\":%u,"
+			       "\"worse\":%u,\"new\":%u}", baseline, bsame, bbetter, bworse, bnone);
+		printf("}}\n");
 	} else if (n > 1) {
 		printf("== %u pass, %u fail, %u timeout, %u lost, %u error, %u skip\n", count[0],
 		       count[1], count[2], count[3], count[4], count[5]);
@@ -566,5 +700,8 @@ int main(int argc, char **argv)
 			printf("\n");
 		}
 	}
+	if (baseline && !o.json)
+		printf("== baseline %s: %u same, %u better, %u worse, %u not in it\n", baseline,
+		       bsame, bbetter, bworse, bnone);
 	return code;
 }

@@ -25,7 +25,11 @@
  *  4. stencil, when D24S8 or D32S8 is an attachment format: a clear of each
  *     layer l >= 1 to its own stencil value (per-layer stencil base);
  *  5. a 3D image viewed as a 6-layer 2D array (Vulkan 1.1): the layers are
- *     slices of a TWIDDLE_3D surface, addressed by the PBE z slice.
+ *     slices of a TWIDDLE_3D surface, addressed by the PBE z slice;
+ *  6. multiview (VK_KHR_multiview) with 6 views over the 6 layers: one draw
+ *     puts geometry in every layer, each with its own colour (gl_ViewIndex).
+ *     It stands in for the gl_Layer draw where that extension is missing,
+ *     and runs on a device of its own, as the first render there.
  * Every colour pixel, depth texel and stencil value of every layer is checked.
  */
 #include <stdio.h>
@@ -37,6 +41,7 @@
 #include "color.frag.h"
 #include "layer.vert.h"
 #include "layer.frag.h"
+#include "mvlayer.frag.h"
 
 constexpr VkFormat FMT = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkFormat DFMT = VK_FORMAT_D32_SFLOAT;
@@ -433,6 +438,126 @@ static enum result rta_3d(struct vk *v, struct report *r, uint32_t w, uint32_t h
 	return check_colour_layers(v, r, "3D slice", &rb, w, h, ce);
 }
 
+/* 6. one full-screen draw in a 6-view multiview render pass; R_SKIP without multiview */
+static enum result rta_multiview(struct vk *v, struct report *r, uint32_t w, uint32_t h,
+				 uint32_t s)
+{
+	VkPhysicalDeviceMultiviewProperties mvp = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES,
+	};
+	VkPhysicalDeviceProperties2 p2 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+		.pNext = &mvp,
+	};
+	struct img im;
+	struct buf rb;
+	VkRenderPass rp;
+	VkFramebuffer fb;
+	VkShaderModule vs, fs;
+	VkPipelineLayout layout;
+	VkPipeline pipe;
+	VkCommandBuffer cb;
+	struct layer_expect ce[L];
+
+	if (!v->has_multiview || v->api < VK_API_VERSION_1_1)
+		return R_SKIP;
+	vkGetPhysicalDeviceProperties2(v->phys, &p2);
+	if (mvp.maxMultiviewViewCount < L)
+		return R_SKIP;
+	CHECK(img_create_layers(v, &im, w, h, L, FMT,
+				VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+	CHECK(buf_create(v, &rb, (VkDeviceSize)w * h * 4 * L, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true));
+	VkAttachmentDescription a = {
+		.format = FMT,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	};
+	VkAttachmentReference cref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription sp = {
+		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+		.colorAttachmentCount = 1,
+		.pColorAttachments = &cref,
+	};
+	VkSubpassDependency dep = {
+		.srcSubpass = 0,
+		.dstSubpass = VK_SUBPASS_EXTERNAL,
+		.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+		.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+	};
+	uint32_t view_mask = (1u << L) - 1, corr_mask = view_mask;
+	VkRenderPassMultiviewCreateInfo mv = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO,
+		.subpassCount = 1,
+		.pViewMasks = &view_mask,
+		.correlationMaskCount = 1,
+		.pCorrelationMasks = &corr_mask,
+	};
+	VkRenderPassCreateInfo rci = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+		.pNext = &mv,
+		.attachmentCount = 1,
+		.pAttachments = &a,
+		.subpassCount = 1,
+		.pSubpasses = &sp,
+		.dependencyCount = 1,
+		.pDependencies = &dep,
+	};
+	VK_CHECK(v, vkCreateRenderPass(v->dev, &rci, nullptr, &rp));
+	vk_track(v, OBJ_RENDER_PASS, H2U(rp));
+	CHECK(fb_create_views(v, &fb, rp, &im.view, 1, w, h, 1));  /* multiview: layers = 1 */
+	CHECK(shader_create(v, &vs, spv_fullscreen_vert, sizeof(spv_fullscreen_vert)));
+	CHECK(shader_create(v, &fs, spv_mvlayer_frag, sizeof(spv_mvlayer_frag)));
+	CHECK(layout_create(v, &layout, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(uint32_t), nullptr));
+	struct gfx_desc d = { .rp = rp, .layout = layout, .vs = vs, .fs = fs };
+
+	CHECK(gfx_pipeline(v, &pipe, &d));
+	VkClearValue clear = { .color.float32 = { 0, 0, 0, 0 } };
+	VkRenderPassBeginInfo rbi = {
+		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		.renderPass = rp,
+		.framebuffer = fb,
+		.renderArea = { { 0, 0 }, { w, h } },
+		.clearValueCount = 1,
+		.pClearValues = &clear,
+	};
+	VkViewport vp = { 0, 0, (float)w, (float)h, 0, 1 };
+	VkRect2D sc = { { 0, 0 }, { w, h } };
+	uint32_t seed = s + 555u;
+
+	CHECK(cmd_begin(v, &cb));
+	vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+	vkCmdSetViewport(cb, 0, 1, &vp);
+	vkCmdSetScissor(cb, 0, 1, &sc);
+	vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(seed), &seed);
+	vkCmdDraw(cb, 3, 1, 0, 0);
+	vkCmdEndRenderPass(cb);
+	for (uint32_t l = 0; l < L; l++) {
+		cmd_copy_layer_to_buffer(cb, &im, l, &rb, (VkDeviceSize)l * w * h * 4);
+		ce[l] = (struct layer_expect){ .c = layer_color(l, seed) };
+	}
+	CHECK(cmd_submit_wait(v, cb));
+	return check_colour_layers(v, r, "multiview", &rb, w, h, ce);
+}
+
+/* step 6 on a fresh device: run_fresh() calls it with the device it made */
+static enum result rta_multiview_fresh(struct vk *v, const struct opts *o, struct report *r)
+{
+	enum result e = rta_multiview(v, r, OPT(o->width, 64), OPT(o->height, 64),
+				      OPT(o->seed, 1));
+
+	if (e == R_SKIP)
+		snprintf(r->detail, sizeof(r->detail), "multiview skipped");
+	return e;
+}
+
 enum result test_rta(struct vk *v, const struct opts *o, struct report *r)
 {
 	uint32_t w = OPT(o->width, 64), h = OPT(o->height, 64), seed = OPT(o->seed, 1);
@@ -448,7 +573,7 @@ enum result test_rta(struct vk *v, const struct opts *o, struct report *r)
 	struct rp_desc rd = { .color = FMT, .depth = DFMT };
 	struct layer_expect last[L];
 	VkFormat dsf = VK_FORMAT_UNDEFINED;
-	enum result st, d3;
+	enum result st, d3, mvr;
 
 	if (w < 8 || h < 8)
 		return R_SETUP;
@@ -579,15 +704,20 @@ enum result test_rta(struct vk *v, const struct opts *o, struct report *r)
 		bad = d3;
 		memcpy(detail, r->detail, sizeof(detail));
 	}
+	mvr = run_fresh(o, rta_multiview_fresh, r);
+	if (mvr != R_PASS && mvr != R_SKIP && bad == R_PASS) {
+		bad = mvr;
+		memcpy(detail, r->detail, sizeof(detail));
+	}
 	if (bad != R_PASS) {
 		memcpy(r->detail, detail, sizeof(detail));
 		return bad;
 	}
 	snprintf(r->detail, sizeof(r->detail),
 		 "%ux%u x %u: colour + D32, draw, clears%s, %u frames; layers 1+5 only; "
-		 "stencil %s; 3D image %s",
+		 "stencil %s; 3D image %s; multiview %s",
 		 w, h, L, draw ? ", gl_Layer draw" : " (no gl_Layer)", frames,
 		 st == R_SKIP ? "skipped" : dsf == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8",
-		 d3 == R_SKIP ? "skipped" : "as 2D array");
+		 d3 == R_SKIP ? "skipped" : "as 2D array", mvr == R_SKIP ? "skipped" : "6 views");
 	return R_PASS;
 }

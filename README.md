@@ -38,7 +38,7 @@ types, and byte-wise checks.
 ```
 vkfwtest [options] <test|group:NAME>... | all | list
   all runs every test except hwr-* and prio-*
-  groups: render compute transfer texture sync memory robust power stress hwr prio
+  groups: render second compute transfer texture sync memory robust power stress hwr prio
 
   -f, --frames N         frames / rounds per test (default per test)
   -s, --size WxH         render target size (or N for NxN)
@@ -56,6 +56,8 @@ vkfwtest [options] <test|group:NAME>... | all | list
   -A, --api X.Y          use at most Vulkan X.Y (instance and device)
   -I, --idle-ms MS       idle-resume: idle time (default: autosuspend delay + 500)
   -D, --dump DIR         write got/expected/diff PPM images of mismatches to DIR
+  -B, --baseline FILE    compare each result with FILE ("<test> <RESULT>" lines);
+                         the exit code then fails only when a test is worse
   -P, --require-preempt  prio-*: fail unless the probes overtake the long job
   -k, --keep-going       run the remaining tests after a failure
   -j, --json             one JSON line per test, and a summary line, on stdout
@@ -63,6 +65,24 @@ vkfwtest [options] <test|group:NAME>... | all | list
 ```
 
 Each test creates its own `VkDevice`, so the kernel creates fresh firmware contexts for it.
+
+**Read-back barrier.** Every read-back copy is preceded by an explicit pipeline barrier.
+The render passes' dependency to `VK_SUBPASS_EXTERNAL` is enough by the Vulkan spec, but Mesa
+`pvr` ignores it, and the copy then races the render. The `second-*` tests (except
+`second-split` and `second-barrier`) keep relying on the dependency alone, to show that bug.
+
+**Baselines.** `--baseline FILE` compares every result with a reference run and prints a `BASE`
+line for each test that is better, worse or not in the file, plus a summary
+(`== baseline FILE: N same, N better, N worse, N not in it`). With a baseline, the exit code is
+0 unless some test is worse. `baselines/` holds the reference runs published in `docsClean`
+(`vkfwtest-results.md`):
+- `mainline-mesa-f7c93a1-manufacturer-fw-1.1.txt`: Linux `7.4.0-rc1-img` + Mesa `pvr`
+  `f7c93a1352` + the manufacturer's open firmware v1.1;
+- `vendor-6.6.63-libVK_IMG.txt`: the vendor kernel, driver and closed firmware.
+
+```
+vkfwtest -k -B baselines/mainline-mesa-f7c93a1-manufacturer-fw-1.1.txt all
+```
 
 **Vulkan versions.** vkfwtest requires only Vulkan 1.0. It asks for the instance version
 the loader offers (falling back to 1.0 if the driver refuses) and uses the lower of the
@@ -114,11 +134,12 @@ On a mismatch, the first 8 wrong values are printed on stderr as `(x,y) got … 
 | `pre-cdm` | compute dispatches (local size 64) | every word equals `lcg(id ^ seed, iters)` |
 | `xfer` | 3D-pipe transfers on a 137×91 (NPOT) and a 256×256 image: upload, copy with offsets onto a cleared image, mirrored 1:1 blit, 4× MSAA clear + resolve | every byte |
 | `bigpb` | parameter-buffer out-of-memory: millions of triangles (4 M by default) into 1024×1024 + `D32_SFLOAT` (stored), so free-list grows and partial renders happen | every pixel equals the **first** layer's colour (later layers are farther away), so a partial render that loses depth or colour fails |
+| `bigpb-layers` | `bigpb` in a 4-layer colour + `D32` array: the grid on layer 0, a clear of its own colour on layers 1-3, so with render-target arrays the partial renders must keep every layer | layer 0 as `bigpb`, layers 1-3 every pixel |
 | `input-attach` | one render pass with two subpasses (two HWRTData). Subpass 0: clear and a depth-tested rectangle. Subpass 1: reads colour + `D32` depth as input attachments | both colour attachments, every pixel |
-| `rta` | a 6-layer colour + `D32` render target (render-target arrays): the render pass clear, a draw without `gl_Layer` (layer 0 only), per-layer colour and depth `vkCmdClearAttachments`, one clear rect over layers 2-4, and, with `VK_EXT_shader_viewport_index_layer`, one `gl_Layer` draw per layer; then a `LOAD` pass that clears only layers 1 and 5, per-layer stencil (D24S8/D32S8), and a 3D image viewed as a 6-layer 2D array (Vulkan 1.1) | every pixel, depth texel and stencil value of every layer; untouched layers keep their contents |
+| `rta` | a 6-layer colour + `D32` render target (render-target arrays): the render pass clear, a draw without `gl_Layer` (layer 0 only), per-layer colour and depth `vkCmdClearAttachments`, one clear rect over layers 2-4, and, with `VK_EXT_shader_viewport_index_layer`, one `gl_Layer` draw per layer; then a `LOAD` pass that clears only layers 1 and 5, per-layer stencil (D24S8/D32S8), a 3D image viewed as a 6-layer 2D array (Vulkan 1.1), and a 6-view multiview draw (one colour per layer, on a fresh device) | every pixel, depth texel and stencil value of every layer; untouched layers keep their contents |
 | `texture` | texture unit: a 37×23 (NPOT) texture with REPEAT, MIRRORED_REPEAT, CLAMP_TO_EDGE, CLAMP_TO_BORDER (white, transparent), LINEAR halfway between texels, and 6 mip levels | every texel or border colour; the linear case allows ±1 |
 | `zs-load` | depth + stencil (D24S8 or D32S8, else depth only) stored by one render pass and loaded by the next two | the depth test and the stencil test of the later passes select the expected halves |
-| `msaa` | 2×/4×/8× rendering resolved by a resolve attachment + depth resolve; a 4× triangle edge along the diagonal | full pixels exact; 4× diagonal pixels equal the average ±1; resolved depth exact |
+| `msaa` | 2×/4×/8× rendering resolved by a resolve attachment + depth resolve; a 4× triangle edge along the diagonal; the 4× sample positions measured with `gl_SamplePosition` | full pixels exact; 4× diagonal pixels equal the mix of the samples inside ±1; measured positions equal the standard ones when the device says so |
 | `mrt` | up to 8 colour attachments written by one subpass | every pixel of every attachment |
 | `sizes` | render targets of 1×1, 7×5, 33×17, 97×61, 256×1, 1×256, 1000×3, 1920×1080, 4096×4096, plus a partial `renderArea` with LOAD | a unique per-pixel value everywhere; pixels outside the render area keep their colour |
 | `vertex` | vertex and index buffers (16- and 32-bit indices, `firstIndex`, `vertexOffset`, `firstInstance`), instancing, point and line lists | every pixel |
@@ -140,10 +161,20 @@ On a mismatch, the first 8 wrong values are printed on stderr as `(x,y) got … 
 | `memory` | large device-local allocation (up to 64 MiB), 256 small allocations, 200 map/unmap cycles | every checked word |
 | `sparse` | sparse buffer binding and residency (`vkQueueBindSparse`) when supported | every word of the bound sparse page |
 | `robust` | `robustBufferAccess`: out-of-bounds read returns 0 or in-bounds data, out-of-bounds write discarded, no fault | all 16 words |
+| `second-same` | the **second render on a device**, one change at a time (group `second`): two renders into the same framebuffer, a new command buffer each | every pixel of both renders |
+| `second-resubmit` | one command buffer (a transfer clearing the image to magenta, then the render) submitted twice | the same |
+| `second-newfb` | the second render into a new image and framebuffer | the same |
+| `second-newall` | the second render with a new render pass, pipeline and framebuffer (the `indirect` pattern) | the same |
+| `second-compute` | render, compute dispatch, render into the same framebuffer | the same, and every word of the dispatch |
+| `second-xfer` | render, transfer (buffer fill + image clear), render | the same, and every word of the fill |
+| `second-split` | the second render's read-back copy in a later submission, after the render's fence | every pixel of both renders |
+| `second-barrier` | the read-back copy also ordered by an explicit `vkCmdPipelineBarrier` | every pixel of both renders |
+| `suspend-after` | compute and sync work, then the GPU must runtime-suspend (sysfs `runtime_status`), then a render; skipped without runtime PM | suspended within the autosuspend delay + 3 s; every pixel |
 | `idle-resume` | render, wait past runtime-PM autosuspend delay (`--idle-ms` or sysfs + 500 ms), render again on the same device | every pixel of both renders |
 | `stress` | four threads with a device each, running `multiframe`, `pre-ta`, `pre-cdm` and `xfer` at the same time | the four tests' own checks |
 | `soak` | one device running `multiframe` ×120, `pre-cdm` ×120, `pre-ta` ×20, `xfer` ×10 | the same |
 | `churn` | 20 devices created and destroyed, each with 2 frames and a dispatch | the same |
+| `ctx-switch` | two devices (two firmware contexts) per round: A renders, B renders or runs a dispatch, both queued before either is waited for | every pixel and word of every round |
 | `hwr-lockup` | **not in `all`**. A compute shader that spins forever. The submission must end in `VK_ERROR_DEVICE_LOST` (watchdog recovery); then `multiframe` and `pre-cdm` must pass on new devices, without reloading the driver | device lost, then the two tests |
 | `hwr-fault` | **not in `all`**. A compute shader that writes and reads about 4 GiB beyond its storage buffer: an MMU page fault. Then the same recovery checks as `hwr-lockup` | device lost, then the two tests |
 | `hwr-frag` | **not in `all`**. A fragment shader that spins forever. Must end in `VK_ERROR_DEVICE_LOST`, then `multiframe` and `pre-cdm` must pass on new devices | device lost, then the two tests |

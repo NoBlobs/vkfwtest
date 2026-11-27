@@ -185,6 +185,12 @@ struct img {
 void img_barrier(VkCommandBuffer cb, const struct img *im, VkImageLayout from, VkImageLayout to,
 		 VkAccessFlags src_access, VkAccessFlags dst_access,
 		 VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
+/*
+ * The read-back copies below first issue a pipeline barrier (all writes ->
+ * transfer reads); true by default. The second-* tests clear it to rely on the
+ * render pass's external subpass dependency alone.
+ */
+extern bool copy_barrier;
 /* Copy a whole 1-sample colour image (TRANSFER_SRC_OPTIMAL) into a host buffer. */
 void cmd_copy_to_buffer(VkCommandBuffer cb, const struct img *im, const struct buf *b);
 /* The same for one layer of an array image (colour or depth), at byte offset `off`. */
@@ -305,6 +311,7 @@ enum result test_preta(struct vk *v, const struct opts *o, struct report *r);
 enum result test_precdm(struct vk *v, const struct opts *o, struct report *r);
 enum result test_xfer(struct vk *v, const struct opts *o, struct report *r);
 enum result test_bigpb(struct vk *v, const struct opts *o, struct report *r);
+enum result test_bigpb_layers(struct vk *v, const struct opts *o, struct report *r);
 enum result test_input_attach(struct vk *v, const struct opts *o, struct report *r);
 enum result test_rta(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_lockup(struct vk *v, const struct opts *o, struct report *r);
@@ -323,6 +330,7 @@ enum result test_formats(struct vk *v, const struct opts *o, struct report *r);
 enum result test_stress(struct vk *v, const struct opts *o, struct report *r);
 enum result test_soak(struct vk *v, const struct opts *o, struct report *r);
 enum result test_churn(struct vk *v, const struct opts *o, struct report *r);
+enum result test_ctx_switch(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_fault(struct vk *v, const struct opts *o, struct report *r);
 enum result test_load_store_none(struct vk *v, const struct opts *o, struct report *r);
 enum result test_sync2(struct vk *v, const struct opts *o, struct report *r);
@@ -343,6 +351,15 @@ enum result test_sync(struct vk *v, const struct opts *o, struct report *r);
 enum result test_memory(struct vk *v, const struct opts *o, struct report *r);
 enum result test_robust(struct vk *v, const struct opts *o, struct report *r);
 enum result test_idle_resume(struct vk *v, const struct opts *o, struct report *r);
+enum result test_suspend_after(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_same(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_resubmit(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_newfb(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_newall(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_compute(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_xfer(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_split(struct vk *v, const struct opts *o, struct report *r);
+enum result test_second_barrier(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_frag(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_3d_fault(struct vk *v, const struct opts *o, struct report *r);
 enum result test_sparse(struct vk *v, const struct opts *o, struct report *r);
