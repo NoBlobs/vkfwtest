@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# vkfwtest baseline: Arch Linux RISC-V, Linux 7.4.0-rc1-img (powervr DRM UAPI 1.1.0) + Mesa pvr-bxe-2-32 (~/mesa-dev, RTA auto-enabled) + manufacturer open firmware v1.1 (build 6976702 OS), BPI-F3
+# Source: vkfwtest 0.2 (commit 8932a2f5), `vkfwtest -k all`, 2026-11-27.
+# Result: 48 pass, 0 fail, 0 timeout, 0 lost, 0 error, 2 skip (0 dmesg faults/resets).
+# Repeatability: bigpb-layers 4/4 PASS, stress 14/14 PASS (10/10 consecutive).
+# Format: <test> <PASS|FAIL|SKIP|TIMEOUT|LOST|ERROR>; use with `vkfwtest --baseline FILE`.
+multiframe       PASS
+pre-ta           PASS
+bigpb            PASS
+bigpb-layers     PASS
+input-attach     PASS
+rta              PASS
+zs-load          PASS
+msaa             PASS
+mrt              PASS
+sizes            PASS
+vertex           PASS
+indirect         PASS
+queries          PASS
+formats          PASS
+secondary        PASS
+multiview        PASS
+raster           PASS
+load-store-none  PASS
+local-read       SKIP
+vertex-ext       PASS
+second-same      PASS
+second-resubmit  PASS
+second-newfb     PASS
+second-newall    PASS
+second-compute   PASS
+second-xfer      PASS
+second-split     PASS
+second-barrier   PASS
+pre-cdm          PASS
+resources        PASS
+compute-dims     PASS
+subgroups        PASS
+xfer             PASS
+buffers          PASS
+ds-copy          PASS
+blit-mips        PASS
+image-copy       PASS
+texture          PASS
+texture2         PASS
+sync             PASS
+sync2            PASS
+memory           PASS
+sparse           SKIP
+robust           PASS
+idle-resume      PASS
+suspend-after    PASS
+stress           PASS
+soak             PASS
+churn            PASS
+ctx-switch       PASS
