@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// robustBufferAccess: read in and far out of bounds of a 16-word buffer.
+#version 450
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer B { uint data[]; } b;
+layout(push_constant) uniform PC { uint far; } pc;
+
+void main()
+{
+	uint inside = b.data[3];
+	uint outside = b.data[pc.far];
+	b.data[0] = inside;
+	b.data[1] = outside;
+	b.data[pc.far + 1u] = 0xBAD0BAD0u;      // a write out of bounds must be discarded
+}

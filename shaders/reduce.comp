@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// The largest workgroup: a shared-memory tree reduction of gl_LocalInvocationIndex.
+#version 450
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint N = 64u;
+layout(std430, set = 0, binding = 0) buffer O { uint v[]; } o;
+shared uint s[N];
+
+void main()
+{
+	uint l = gl_LocalInvocationIndex;
+	s[l] = l + 1u;
+	barrier();
+	for (uint step = 1u; step < N; step *= 2u) {
+		uint other = (l + step < N) ? s[l + step] : 0u;
+		barrier();
+		if ((l % (2u * step)) == 0u)
+			s[l] += other;
+		barrier();
+	}
+	if (l == 0u)
+		o.v[gl_WorkGroupID.x] = s[0];
+}

@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// Subgroups: per invocation, the subgroup size, the elected invocation,
+// bitCount of a ballot of all-true, and subgroupAdd(1).
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) buffer O { uvec4 v[]; } o;
+layout(push_constant) uniform PC { uint ops; } pc;   // bit 0 ballot, bit 1 arithmetic
+
+void main()
+{
+	uint i = gl_GlobalInvocationID.x;
+	uint ballot = 0u, sum = 0u;
+	if ((pc.ops & 1u) != 0u)
+		ballot = subgroupBallotBitCount(subgroupBallot(true));
+	if ((pc.ops & 2u) != 0u)
+		sum = subgroupAdd(1u);
+	o.v[i] = uvec4(gl_SubgroupSize, subgroupElect() ? 1u : 0u, ballot, sum);
+}

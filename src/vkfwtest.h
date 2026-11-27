@@ -42,6 +42,12 @@ struct opts {
 	bool json;
 	bool require_preempt;   /* prio-*: fail unless the high-priority probes overtake */
 	int verbose;            /* -1 quiet, 0 normal, 1+ verbose */
+	const char *dump;       /* directory for PPM images of mismatches */
+	uint32_t test_timeout_s;        /* whole-test limit (0: none) */
+	bool keep_device;       /* run the tests on one device */
+	uint32_t idle_ms;       /* idle-resume: idle time (0: autosuspend delay + margin) */
+	uint32_t bench;         /* run each test N times and print timings */
+	bool robust;            /* enable robustBufferAccess (internal) */
 };
 
 #define OPT(v, def) ((v) ? (v) : (def))
@@ -50,7 +56,7 @@ struct opts {
 enum obj_kind {
 	OBJ_BUFFER, OBJ_IMAGE, OBJ_VIEW, OBJ_MEMORY, OBJ_RENDER_PASS, OBJ_FRAMEBUFFER,
 	OBJ_PIPELINE, OBJ_PIPELINE_LAYOUT, OBJ_SET_LAYOUT, OBJ_DESC_POOL, OBJ_SHADER,
-	OBJ_SAMPLER, OBJ_QUERY_POOL,
+	OBJ_SAMPLER, OBJ_QUERY_POOL, OBJ_EVENT, OBJ_SEMAPHORE, OBJ_BUFFER_VIEW,
 };
 
 /* Non-dispatchable handles are pointers on 64-bit hosts, uint64_t elsewhere. */
@@ -70,7 +76,9 @@ struct vk {
 	VkPhysicalDeviceProperties props;
 	VkPhysicalDeviceMemoryProperties mem;
 	VkDevice dev;
-	VkQueue queue;
+	VkQueue queue;          /* queues[0] */
+	VkQueue queues[2];
+	uint32_t nqueues;
 	uint32_t qfam;
 	VkCommandPool pool;
 	VkFence fence;
@@ -79,6 +87,11 @@ struct vk {
 	bool has_output_layer;  /* VK_EXT_shader_viewport_index_layer enabled */
 	bool has_precise_occlusion;     /* occlusionQueryPrecise enabled */
 	bool has_multidraw;             /* multiDrawIndirect enabled */
+	VkPhysicalDeviceFeatures feat;  /* the base features enabled */
+	bool has_multiview, has_timeline;
+	VkPhysicalDeviceSubgroupProperties subgroup;
+	const char *dump;               /* --dump directory, or null */
+	const char *test;               /* name of the running test (dump file names) */
 	int verbose;
 	struct { enum obj_kind kind; uint64_t h; } objs[MAX_OBJS];
 	int nobjs;
@@ -297,6 +310,22 @@ enum result test_stress(struct vk *v, const struct opts *o, struct report *r);
 enum result test_soak(struct vk *v, const struct opts *o, struct report *r);
 enum result test_churn(struct vk *v, const struct opts *o, struct report *r);
 enum result test_hwr_fault(struct vk *v, const struct opts *o, struct report *r);
+enum result test_secondary(struct vk *v, const struct opts *o, struct report *r);
+enum result test_multiview(struct vk *v, const struct opts *o, struct report *r);
+enum result test_raster(struct vk *v, const struct opts *o, struct report *r);
+enum result test_resources(struct vk *v, const struct opts *o, struct report *r);
+enum result test_compute_dims(struct vk *v, const struct opts *o, struct report *r);
+enum result test_subgroups(struct vk *v, const struct opts *o, struct report *r);
+enum result test_buffers(struct vk *v, const struct opts *o, struct report *r);
+enum result test_ds_copy(struct vk *v, const struct opts *o, struct report *r);
+enum result test_blit_mips(struct vk *v, const struct opts *o, struct report *r);
+enum result test_image_copy(struct vk *v, const struct opts *o, struct report *r);
+enum result test_texture2(struct vk *v, const struct opts *o, struct report *r);
+enum result test_sync(struct vk *v, const struct opts *o, struct report *r);
+enum result test_memory(struct vk *v, const struct opts *o, struct report *r);
+enum result test_robust(struct vk *v, const struct opts *o, struct report *r);
+enum result test_idle_resume(struct vk *v, const struct opts *o, struct report *r);
+enum result test_hwr_frag(struct vk *v, const struct opts *o, struct report *r);
 
 /* grid.c: the tiled-triangle workload shared by pre-ta and bigpb */
 struct grid {

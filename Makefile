@@ -32,7 +32,7 @@ $(BUILD)/vkfwtest: $(OBJS)
 
 # shaders are embedded as uint32_t arrays: no shader compiler on the target
 $(BUILD)/%.h: shaders/% | $(BUILD)
-	$(GLSLANG) -V --quiet --vn spv_$(subst .,_,$*) -o $@.tmp $<
+	$(GLSLANG) -V --target-env vulkan1.1 --quiet --vn spv_$(subst .,_,$*) -o $@.tmp $<
 	sed 's/^const uint32_t/static const uint32_t/' $@.tmp > $@ && rm -f $@.tmp
 
 $(BUILD)/%.o: src/%.c src/vkfwtest.h $(SPV_H) | $(BUILD)

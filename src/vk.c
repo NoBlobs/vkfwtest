@@ -70,11 +70,12 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	VkDeviceQueueGlobalPriorityCreateInfoKHR gp = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR,
 	};
+	float prios[2] = { prio, prio };
 	VkDeviceQueueCreateInfo q = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
 		.queueFamilyIndex = v->qfam,
-		.queueCount = 1,
-		.pQueuePriorities = &prio,
+		.queueCount = v->nqueues,
+		.pQueuePriorities = prios,
 	};
 	const char *ext[2];
 	uint32_t next = 0, n = 0;
@@ -110,10 +111,49 @@ static VkResult create_device(struct vk *v, const struct opts *o, bool with_prio
 	vkGetPhysicalDeviceFeatures(v->phys, &have);
 	want.occlusionQueryPrecise = have.occlusionQueryPrecise;
 	want.multiDrawIndirect = have.multiDrawIndirect;
+	want.fragmentStoresAndAtomics = have.fragmentStoresAndAtomics;
+	want.vertexPipelineStoresAndAtomics = have.vertexPipelineStoresAndAtomics;
+	want.depthClamp = have.depthClamp;
+	want.depthBiasClamp = have.depthBiasClamp;
+	want.textureCompressionETC2 = have.textureCompressionETC2;
+	want.imageCubeArray = have.imageCubeArray;
+	want.sampleRateShading = have.sampleRateShading;
+	want.samplerAnisotropy = have.samplerAnisotropy;
+	want.robustBufferAccess = o->robust && have.robustBufferAccess;
 	v->has_precise_occlusion = have.occlusionQueryPrecise;
 	v->has_multidraw = have.multiDrawIndirect;
+	v->feat = want;
+
+	/* 1.1 / 1.2 features: multiview, timeline semaphores */
+	VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+	VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+						 .pNext = &f12 };
+	VkPhysicalDeviceMultiviewFeatures mv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+	VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+	VkPhysicalDeviceVulkan12Features e12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+	VkPhysicalDeviceVulkan11Features e11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+						 .pNext = &e12 };
+	VkPhysicalDeviceMultiviewFeatures emv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES };
+	void *chain = nullptr;
+
+	if (v->props.apiVersion >= VK_API_VERSION_1_2) {
+		f2.pNext = &f11;
+		vkGetPhysicalDeviceFeatures2(v->phys, &f2);
+		e11.multiview = f11.multiview;
+		e12.timelineSemaphore = f12.timelineSemaphore;
+		v->has_multiview = f11.multiview;
+		v->has_timeline = f12.timelineSemaphore;
+		chain = &e11;
+	} else if (v->props.apiVersion >= VK_API_VERSION_1_1) {
+		f2.pNext = &mv;
+		vkGetPhysicalDeviceFeatures2(v->phys, &f2);
+		emv.multiview = mv.multiview;
+		v->has_multiview = mv.multiview;
+		chain = &emv;
+	}
 	VkDeviceCreateInfo dci = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+		.pNext = chain,
 		.queueCreateInfoCount = 1,
 		.pQueueCreateInfos = &q,
 		.enabledExtensionCount = next,
@@ -128,7 +168,7 @@ enum result vk_init(struct vk *v, const struct opts *o)
 	VkApplicationInfo app = {
 		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 		.pApplicationName = "vkfwtest",
-		.apiVersion = VK_API_VERSION_1_1,
+		.apiVersion = VK_API_VERSION_1_2,
 	};
 	VkInstanceCreateInfo ici = {
 		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -140,6 +180,7 @@ enum result vk_init(struct vk *v, const struct opts *o)
 
 	memset(v, 0, sizeof(*v));
 	v->verbose = o->verbose;
+	v->dump = o->dump;
 	v->timeout_ns = (uint64_t)OPT(o->timeout_s, 60) * 1000000000ull;
 	VK_CHECK(v, vkCreateInstance(&ici, nullptr, &v->inst));
 
@@ -175,6 +216,13 @@ enum result vk_init(struct vk *v, const struct opts *o)
 	free(devs);
 	vkGetPhysicalDeviceProperties(v->phys, &v->props);
 	vkGetPhysicalDeviceMemoryProperties(v->phys, &v->mem);
+	if (v->props.apiVersion >= VK_API_VERSION_1_1) {
+		VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+						   .pNext = &v->subgroup };
+
+		v->subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+		vkGetPhysicalDeviceProperties2(v->phys, &p2);
+	}
 	LOG(v, 1, "vkfwtest: device %d: %s\n", pick, v->props.deviceName);
 
 	/* one queue family with graphics and compute (transfer is implied) */
@@ -187,6 +235,7 @@ enum result vk_init(struct vk *v, const struct opts *o)
 		if ((qf[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) ==
 		    (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) {
 			v->qfam = i;
+			v->nqueues = qf[i].queueCount >= 2 ? 2 : 1;
 			break;
 		}
 	if (v->qfam == UINT32_MAX) {
@@ -204,7 +253,9 @@ enum result vk_init(struct vk *v, const struct opts *o)
 	}
 	if (r != VK_SUCCESS)
 		VK_CHECK(v, create_device(v, o, false));
-	vkGetDeviceQueue(v->dev, v->qfam, 0, &v->queue);
+	for (uint32_t i = 0; i < v->nqueues; i++)
+		vkGetDeviceQueue(v->dev, v->qfam, i, &v->queues[i]);
+	v->queue = v->queues[0];
 
 	VkCommandPoolCreateInfo pci = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -250,6 +301,13 @@ void vk_fini(struct vk *v)
 				vkDestroyShaderModule(v->dev, U2H(VkShaderModule, h), nullptr);
 				break;
 			case OBJ_SAMPLER: vkDestroySampler(v->dev, U2H(VkSampler, h), nullptr); break;
+			case OBJ_EVENT: vkDestroyEvent(v->dev, U2H(VkEvent, h), nullptr); break;
+			case OBJ_SEMAPHORE:
+				vkDestroySemaphore(v->dev, U2H(VkSemaphore, h), nullptr);
+				break;
+			case OBJ_BUFFER_VIEW:
+				vkDestroyBufferView(v->dev, U2H(VkBufferView, h), nullptr);
+				break;
 			case OBJ_QUERY_POOL:
 				vkDestroyQueryPool(v->dev, U2H(VkQueryPool, h), nullptr);
 				break;
@@ -976,6 +1034,58 @@ enum result gfx_pipeline(struct vk *v, VkPipeline *p, const struct gfx_desc *d)
 }
 
 /* ------------------------------------------------------------ checking */
+static bool near(uint8_t a, uint8_t b, uint32_t tol)
+{
+	return (uint32_t)(a > b ? a - b : b - a) <= tol;
+}
+
+/*
+ * --dump: write what was read back, what was expected and a mask of the
+ * differing pixels as binary PPM (RGB; alpha dropped) files named
+ * <dir>/<test>-<what>-{got,expected,diff}.ppm.
+ */
+static void dump_images(struct vk *v, const char *what, const uint8_t *px, uint32_t w, uint32_t h,
+			uint32_t tol, expect_fn fn, const void *ctx)
+{
+	char base[512], name[600], clean[128];
+	size_t k = 0;
+	FILE *f[3];
+	static const char *const kind[3] = { "got", "expected", "diff" };
+
+	for (const char *c = what; *c && k + 1 < sizeof(clean); c++)
+		clean[k++] = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+				     (*c >= '0' && *c <= '9') ? *c : '_';
+	clean[k] = '\0';
+	snprintf(base, sizeof(base), "%s/%s-%s", v->dump, v->test ? v->test : "test", clean);
+	for (int i = 0; i < 3; i++) {
+		snprintf(name, sizeof(name), "%s-%s.ppm", base, kind[i]);
+		f[i] = fopen(name, "wb");
+		if (!f[i]) {
+			fprintf(stderr, "vkfwtest: cannot write %s\n", name);
+			for (int j = 0; j < i; j++)
+				fclose(f[j]);
+			return;
+		}
+		fprintf(f[i], "P6\n%u %u\n255\n", w, h);
+	}
+	for (uint32_t y = 0; y < h; y++)
+		for (uint32_t x = 0; x < w; x++) {
+			const uint8_t *p = px + ((size_t)y * w + x) * 4;
+			struct rgba e = fn(x, y, ctx);
+			bool ok = near(p[0], e.r, tol) && near(p[1], e.g, tol) && near(p[2], e.b, tol) &&
+				  near(p[3], e.a, tol);
+			uint8_t d[3] = { ok ? 0 : 255, 0, 0 };
+			uint8_t ex[3] = { e.r, e.g, e.b };
+
+			fwrite(p, 1, 3, f[0]);
+			fwrite(ex, 1, 3, f[1]);
+			fwrite(d, 1, 3, f[2]);
+		}
+	for (int i = 0; i < 3; i++)
+		fclose(f[i]);
+	fprintf(stderr, "vkfwtest: wrote %s-{got,expected,diff}.ppm\n", base);
+}
+
 enum result check_rgba_step(struct vk *v, struct report *r, const char *what, const uint8_t *px,
 			    uint32_t w, uint32_t h, uint32_t step, expect_fn fn, const void *ctx)
 {
@@ -1001,16 +1111,13 @@ enum result check_rgba_step(struct vk *v, struct report *r, const char *what, co
 	r->checked += n;
 	r->mismatches += bad;
 	if (bad) {
+		if (v->dump)
+			dump_images(v, what, px, w, h, 0, fn, ctx);
 		snprintf(r->detail, sizeof(r->detail), "%s: %" PRIu64 " of %" PRIu64 " pixels wrong",
 			 what, bad, n);
 		return R_MISMATCH;
 	}
 	return R_PASS;
-}
-
-static bool near(uint8_t a, uint8_t b, uint32_t tol)
-{
-	return (uint32_t)(a > b ? a - b : b - a) <= tol;
 }
 
 enum result check_rgba_tol(struct vk *v, struct report *r, const char *what, const uint8_t *px,
@@ -1036,6 +1143,8 @@ enum result check_rgba_tol(struct vk *v, struct report *r, const char *what, con
 	r->checked += (uint64_t)w * h;
 	r->mismatches += bad;
 	if (bad) {
+		if (v->dump)
+			dump_images(v, what, px, w, h, tol, fn, ctx);
 		snprintf(r->detail, sizeof(r->detail), "%s: %" PRIu64 " of %" PRIu64 " pixels wrong",
 			 what, bad, (uint64_t)w * h);
 		return R_MISMATCH;

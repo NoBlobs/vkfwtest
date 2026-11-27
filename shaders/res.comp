@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// Shader resources in one dispatch (64 x 4 invocations):
+//  out[i]       = ubo.k.x * i + ubo.k.y        (UBO, SSBO at a dynamic offset)
+//  img(i%64, i/64) = i ^ ubo.k.z               (storage image r32ui)
+//  stexel[i]    = utexel[i] + 7                (uniform / storage texel buffers)
+//  counter      = atomicAdd per invocation     (atomics)
+//  rev[i]       = shared[63 - local] of its group (shared memory + barrier)
+#version 450
+layout(local_size_x = 64) in;
+layout(std140, set = 0, binding = 0) uniform U { uvec4 k; } ubo;
+layout(std430, set = 0, binding = 1) buffer O { uint v[]; } outb;
+layout(set = 0, binding = 2, r32ui) uniform writeonly uimage2D img;
+layout(set = 0, binding = 3) uniform usamplerBuffer utexel;
+layout(set = 0, binding = 4, r32ui) uniform writeonly uimageBuffer stexel;
+layout(std430, set = 0, binding = 5) buffer C { uint counter; uint rev[]; } cnt;
+shared uint s[64];
+
+void main()
+{
+	uint i = gl_GlobalInvocationID.x, l = gl_LocalInvocationID.x;
+	outb.v[i] = ubo.k.x * i + ubo.k.y;
+	imageStore(img, ivec2(i % 64u, i / 64u), uvec4(i ^ ubo.k.z));
+	imageStore(stexel, int(i), uvec4(texelFetch(utexel, int(i)).x + 7u));
+	atomicAdd(cnt.counter, 1u);
+	s[l] = i * 3u;
+	barrier();
+	cnt.rev[i] = s[63u - l];
+}
