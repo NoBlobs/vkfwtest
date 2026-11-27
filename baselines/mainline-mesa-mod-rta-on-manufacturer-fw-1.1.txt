@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# vkfwtest baseline: Linux 7.4.0-rc1-img + modified Mesa pvr 27.0.0-devel (mesa-rta, gs_rta_support on) + manufacturer open firmware v1.1 (build 6976702 OS), BPI-F3
+# Source: docsClean vkfwtest-results.md, vkfwtest 0.2 (commit 8932a2f5), `vkfwtest -k all`.
+# Format: <test> <PASS|FAIL|SKIP|TIMEOUT|LOST|ERROR>; use with `vkfwtest --baseline FILE`.
+# Totals: 40 PASS, 8 FAIL (rta subset layer 5 + 6x second-* + suspend-after), 2 SKIP (local-read, sparse), 0 dmesg faults.
+multiframe       PASS
+pre-ta           PASS
+bigpb            PASS
+bigpb-layers     PASS
+input-attach     PASS
+rta              FAIL
+zs-load          PASS
+msaa             PASS
+mrt              PASS
+sizes            PASS
+vertex           PASS
+indirect         PASS
+queries          PASS
+formats          PASS
+secondary        PASS
+multiview        PASS
+raster           PASS
+load-store-none  PASS
+local-read       SKIP
+vertex-ext       PASS
+second-same      FAIL
+second-resubmit  FAIL
+second-newfb     FAIL
+second-newall    FAIL
+second-compute   FAIL
+second-xfer      FAIL
+second-split     PASS
+second-barrier   PASS
+pre-cdm          PASS
+resources        PASS
+compute-dims     PASS
+subgroups        PASS
+xfer             PASS
+buffers          PASS
+ds-copy          PASS
+blit-mips        PASS
+image-copy       PASS
+texture          PASS
+texture2         PASS
+sync             PASS
+sync2            PASS
+memory           PASS
+sparse           SKIP
+robust           PASS
+idle-resume      PASS
+suspend-after    FAIL
+stress           PASS
+soak             PASS
+churn            PASS
+ctx-switch       PASS
