@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Thalles Campagnani
+// buf[id] = lcg(id ^ seed, iters); the CPU checks every word.
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) buffer B { uint data[]; } b;
+layout(push_constant) uniform PC { uint seed; uint iters; } pc;
+
+void main()
+{
+	uint id = gl_GlobalInvocationID.x;
+	uint x = id ^ pc.seed;
+	for (uint i = 0u; i < pc.iters; i++)
+		x = x * 1664525u + 1013904223u;
+	b.data[id] = x;
+}
