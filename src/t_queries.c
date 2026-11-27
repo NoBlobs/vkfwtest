@@ -46,7 +46,7 @@ enum result test_queries(struct vk *v, const struct opts *o, struct report *r)
 	VkShaderModule vs, fs, fvs, ffs;
 	VkPipelineLayout layout, l_heavy;
 	VkPipeline pipe, heavy;
-	VkQueryPool occ, ts;
+	VkQueryPool occ, ts = VK_NULL_HANDLE;
 	VkFormatProperties fp;
 
 	vkGetPhysicalDeviceFormatProperties(v->phys, DFMT, &fp);
@@ -89,10 +89,13 @@ enum result test_queries(struct vk *v, const struct opts *o, struct report *r)
 	vkGetPhysicalDeviceQueueFamilyProperties(v->phys, &nq, qf);
 	uint32_t ts_bits = qf[v->qfam].timestampValidBits;
 
-	qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-	qci.queryCount = 2;
-	VK_CHECK(v, vkCreateQueryPool(v->dev, &qci, nullptr, &ts));
-	vk_track(v, OBJ_QUERY_POOL, H2U(ts));
+	/* without valid bits, vkCmdWriteTimestamp is not allowed (Vulkan spec) */
+	if (ts_bits) {
+		qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		qci.queryCount = 2;
+		VK_CHECK(v, vkCreateQueryPool(v->dev, &qci, nullptr, &ts));
+		vk_track(v, OBJ_QUERY_POOL, H2U(ts));
+	}
 
 	const uint64_t want[3] = { 40 * 24, 0, 0 };
 
@@ -123,12 +126,14 @@ enum result test_queries(struct vk *v, const struct opts *o, struct report *r)
 		hidden.z = 0.7f;
 		CHECK(cmd_begin(v, &cb));
 		vkCmdResetQueryPool(cb, occ, 0, 3);
-		vkCmdResetQueryPool(cb, ts, 0, 2);
+		if (ts_bits)
+			vkCmdResetQueryPool(cb, ts, 0, 2);
 		vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdSetViewport(cb, 0, 1, &vp);
 		vkCmdSetScissor(cb, 0, 1, &sc);
 		/* a heavy full-screen draw between two timestamps (depth test off) */
-		vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts, 0);
+		if (ts_bits)
+			vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts, 0);
 		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, heavy);
 		vkCmdPushConstants(cb, l_heavy, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(hpc), &hpc);
 		vkCmdDraw(cb, 3, 1, 0, 0);
@@ -147,7 +152,8 @@ enum result test_queries(struct vk *v, const struct opts *o, struct report *r)
 				vkCmdEndQuery(cb, occ, (uint32_t)query[i]);
 		}
 		vkCmdEndRenderPass(cb);
-		vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts, 1);
+		if (ts_bits)
+			vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ts, 1);
 		vkCmdCopyQueryPoolResults(cb, occ, 0, 3, gpu_res.b, 0, 8,
 					  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 		VkBufferMemoryBarrier hb = {

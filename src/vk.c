@@ -668,6 +668,55 @@ enum result img_create_layers(struct vk *v, struct img *im, uint32_t w, uint32_t
 	return img_make(v, im, w, h, layers, fmt, usage, VK_SAMPLE_COUNT_1_BIT);
 }
 
+/*
+ * A 3D image of `depth` slices that can be viewed as a 2D array (Vulkan 1.1,
+ * VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT); im->view is that 2D array view.
+ */
+enum result img_create_3d_array(struct vk *v, struct img *im, uint32_t w, uint32_t h,
+				uint32_t depth, VkFormat fmt, VkImageUsageFlags usage)
+{
+	VkImageCreateInfo ici = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT,
+		.imageType = VK_IMAGE_TYPE_3D,
+		.format = fmt,
+		.extent = { w, h, depth },
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = usage,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+	VkMemoryRequirements req;
+
+	if (v->api < VK_API_VERSION_1_1)
+		return R_SKIP;
+	memset(im, 0, sizeof(*im));
+	im->fmt = fmt;
+	im->w = w;
+	im->h = h;
+	im->layers = depth;
+	im->samples = VK_SAMPLE_COUNT_1_BIT;
+	im->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+	VK_CHECK(v, vkCreateImage(v->dev, &ici, nullptr, &im->i));
+	vk_track(v, OBJ_IMAGE, H2U(im->i));
+	vkGetImageMemoryRequirements(v->dev, im->i, &req);
+	CHECK(alloc_bind(v, &im->m, req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+	VK_CHECK(v, vkBindImageMemory(v->dev, im->i, im->m, 0));
+	VkImageViewCreateInfo vci = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = im->i,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+		.format = fmt,
+		.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, depth },
+	};
+	VK_CHECK(v, vkCreateImageView(v->dev, &vci, nullptr, &im->view));
+	vk_track(v, OBJ_VIEW, H2U(im->view));
+	return R_PASS;
+}
+
 enum result shader_create(struct vk *v, VkShaderModule *m, const uint32_t *code, size_t size)
 {
 	VkShaderModuleCreateInfo sci = {
@@ -787,7 +836,7 @@ void cmd_copy_layer_to_buffer(VkCommandBuffer cb, const struct img *im, uint32_t
 {
 	VkBufferImageCopy c = {
 		.bufferOffset = off,
-		.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 },
+		.imageSubresource = { im->aspect, 0, layer, 1 },
 		.imageExtent = { im->w, im->h, 1 },
 	};
 	VkBufferMemoryBarrier hb = {

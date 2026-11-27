@@ -168,6 +168,10 @@ struct img {
 [[nodiscard]] enum result img_create_layers(struct vk *v, struct img *im, uint32_t w,
 					    uint32_t h, uint32_t layers, VkFormat fmt,
 					    VkImageUsageFlags usage);
+/* A 3D image viewed as a 2D array of `depth` layers (Vulkan 1.1); R_SKIP below 1.1. */
+[[nodiscard]] enum result img_create_3d_array(struct vk *v, struct img *im, uint32_t w,
+					      uint32_t h, uint32_t depth, VkFormat fmt,
+					      VkImageUsageFlags usage);
 [[nodiscard]] enum result shader_create(struct vk *v, VkShaderModule *m, const uint32_t *code,
 					size_t size);
 
@@ -183,7 +187,7 @@ void img_barrier(VkCommandBuffer cb, const struct img *im, VkImageLayout from, V
 		 VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage);
 /* Copy a whole 1-sample colour image (TRANSFER_SRC_OPTIMAL) into a host buffer. */
 void cmd_copy_to_buffer(VkCommandBuffer cb, const struct img *im, const struct buf *b);
-/* The same for one layer of an array image, at byte offset `off` of the buffer. */
+/* The same for one layer of an array image (colour or depth), at byte offset `off`. */
 void cmd_copy_layer_to_buffer(VkCommandBuffer cb, const struct img *im, uint32_t layer,
 			      const struct buf *b, VkDeviceSize off);
 

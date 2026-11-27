@@ -21,7 +21,9 @@ Known limits
 
 * ``rta``: the ``gl_Layer`` draw needs
   ``VK_EXT_shader_viewport_index_layer``, which the current PowerVR driver
-  lacks; there, only the layered clears run.
+  lacks; there, the layered clears, the layer-0 draw and the depth layers run.
+  They are what exercises the firmware's layer loop: with firmware 1.1 the
+  driver turns on ``gs_rta_support`` and sends all six layers as one render.
 * ``indirect``: the multi-draw part needs ``multiDrawIndirect``.
 * ``queries``: exact occlusion counts need ``occlusionQueryPrecise``;
   without it only zero / non-zero is checked.

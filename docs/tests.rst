@@ -38,8 +38,8 @@ Render
      - one render pass with two subpasses (two HWRTData). Subpass 0: clear and a depth-tested rectangle. Subpass 1: reads colour + ``D32`` depth as input attachments
      - both colour attachments, every pixel
    * - ``rta``
-     - a 6-layer render target (render-target arrays): the render pass clear, per-layer ``vkCmdClearAttachments``, and, with ``VK_EXT_shader_viewport_index_layer``, one ``gl_Layer`` draw per layer
-     - every pixel of every layer
+     - a 6-layer colour + ``D32`` render target (render-target arrays; on PowerVR with firmware 1.1, one render for all layers): the render pass clear, a draw without ``gl_Layer`` (layer 0 only), per-layer colour and depth ``vkCmdClearAttachments``, one clear rect over layers 2-4, and, with ``VK_EXT_shader_viewport_index_layer``, one ``gl_Layer`` draw per layer; then a ``LOAD`` pass that clears only layers 1 and 5 (the firmware renders only the touched layers), per-layer stencil (D24S8/D32S8), and a 3D image viewed as a 6-layer 2D array (Vulkan 1.1, PBE z slice)
+     - every pixel, depth texel and stencil value of every layer; untouched layers keep their contents
    * - ``zs-load``
      - depth + stencil (D24S8 or D32S8, else depth only) stored by one render pass and loaded by the next two
      - the depth test and the stencil test of the later passes select the expected halves
@@ -59,7 +59,7 @@ Render
      - ``vkCmdDrawIndirect``, ``vkCmdDrawIndexedIndirect``, multi-draw indirect (when supported), ``vkCmdDispatchIndirect``
      - the drawn cells; the dispatched words, with a sentinel after them
    * - ``queries``
-     - occlusion queries (exact with ``occlusionQueryPrecise``), read on the host and copied by the GPU; timestamps
+     - occlusion queries (exact with ``occlusionQueryPrecise``), read on the host and copied by the GPU; timestamps only when the queue family has ``timestampValidBits``
      - 960 / 0 / 0 samples; increasing timestamps
    * - ``formats``
      - R5G6B5, B8G8R8A8, R8G8B8A8_SRGB, R16G16B16A16_SFLOAT, R32_UINT targets; additive blending; ``discard``
